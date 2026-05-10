@@ -27,13 +27,10 @@ except Exception:
 
 from serial_protocol import (
     DIAGNOSTIC_PATTERNS,
-    NAME_PATTERNS,
     build_sweep_command,
-    parse_array_from_line,
     parse_diagnostics_from_text,
     parse_measurement_frame_from_text,
     read_measurement_frame_from_serial as read_protocol_measurement_frame_from_serial,
-    read_optional_diagnostics_from_serial,
 )
 from serial_transport import open_serial_transport, write_ascii_command
 
@@ -59,6 +56,16 @@ MIN_RELIABLE_DECADES_SIMPLE = 1.20
 MIN_RELIABLE_DECADES_BAND = 1.50
 MIN_EDGE_DECADES = 0.25
 MIN_ORDER_SPAN_DB = 6.0
+COMPACT_DIAGNOSTIC_KEYS = {'adc_code_range', 'clip_point_count'}
+PER_POINT_DIAGNOSTIC_KEYS = tuple(
+    key for key in DIAGNOSTIC_PATTERNS
+    if key not in COMPACT_DIAGNOSTIC_KEYS
+)
+LOWPASS_OUTPUT_NOISE_FLOOR_RMS_V = 0.004
+LOWPASS_NOISE_FLOOR_DROP_DB = 30.0
+LOWPASS_NOISE_FLOOR_MIN_KEEP_POINTS = 12
+LOWPASS_NOISE_FLOOR_MIN_REMOVE_POINTS = 3
+MIN_VALID_ANALYSIS_POINTS = 5
 
 EXPECTED_CIRCUIT_CHOICES = [
     'Auto',
@@ -86,8 +93,8 @@ EXPECTED_CIRCUIT_MAP = {
 AUTO_COARSE_SWEEP = (100.0, 100000.0, 1000.0, 0.6)
 AUTO_SWEEP_SEGMENTS = {
     'lowpass': [
-        (100.0, 30000.0, 300.0, 0.6),
-        (10000.0, 100000.0, 900.0, 0.6),
+        (100.0, 3000.0, 50.0, 1.2),
+        (3000.0, 20000.0, 300.0, 1.2),
     ],
     'highpass': [
         (10.0, 5000.0, 50.0, 0.6),
@@ -109,6 +116,51 @@ AUTO_SWEEP_SEGMENTS = {
         (30000.0, 100000.0, 1000.0, 0.6),
     ],
 }
+
+DEMO_SWEEP_SEGMENTS = {
+    ('lowpass', 1): [
+        (50.0, 8000.0, 100.0, 0.6),
+        (8000.0, 60000.0, 800.0, 0.6),
+    ],
+    ('lowpass', 2): [
+        (50.0, 8000.0, 100.0, 0.6),
+        (8000.0, 60000.0, 800.0, 0.6),
+    ],
+    ('lowpass', 3): [
+        (100.0, 3000.0, 50.0, 1.2),
+        (3000.0, 20000.0, 300.0, 1.2),
+    ],
+    ('highpass', 1): [
+        (50.0, 8000.0, 100.0, 0.6),
+        (8000.0, 60000.0, 800.0, 0.6),
+    ],
+    ('highpass', 2): [
+        (50.0, 8000.0, 100.0, 0.6),
+        (8000.0, 60000.0, 800.0, 0.6),
+    ],
+    ('highpass', 3): [
+        (50.0, 8000.0, 100.0, 0.6),
+        (8000.0, 60000.0, 800.0, 0.6),
+    ],
+    ('bandpass', None): [
+        (50.0, 2500.0, 50.0, 0.6),
+        (2500.0, 25000.0, 250.0, 0.6),
+        (25000.0, 80000.0, 1000.0, 0.6),
+    ],
+    ('bandstop', None): [
+        (100.0, 1000.0, 100.0, 0.6),
+        (1000.0, 2400.0, 25.0, 0.6),
+        (2400.0, 30000.0, 300.0, 0.6),
+        (30000.0, 80000.0, 1000.0, 0.6),
+    ],
+}
+
+
+def demo_segments_for_expected(expected: str):
+    target = EXPECTED_CIRCUIT_MAP.get(expected)
+    if target is None:
+        return None
+    return DEMO_SWEEP_SEGMENTS.get(target) or DEMO_SWEEP_SEGMENTS.get((target[0], None))
 
 
 def configure_plot_fonts():
@@ -163,6 +215,12 @@ def summarize_measurement_diagnostics(
     phase_repeat_span = get_array('phase_repeat_span_rad')
     input_pp = get_array('input_pp_v')
     output_pp = get_array('output_pp_v')
+    input_min_code = get_array('input_min_code')
+    input_max_code = get_array('input_max_code')
+    output_min_code = get_array('output_min_code')
+    output_max_code = get_array('output_max_code')
+    adc_code_range = diagnostics.get('adc_code_range')
+    clip_point_count = diagnostics.get('clip_point_count')
 
     if input_rms is not None and output_rms is not None:
         notes.append(
@@ -175,6 +233,45 @@ def summarize_measurement_diagnostics(
         notes.append(
             f'峰峰值: 输入P-P中位数 {float(np.median(input_pp)):.4f} V，输出P-P中位数 {float(np.median(output_pp)):.4f} V。'
         )
+
+    if (
+        input_min_code is not None and input_max_code is not None
+        and output_min_code is not None and output_max_code is not None
+    ):
+        in_min_values = input_min_code[np.isfinite(input_min_code)]
+        in_max_values = input_max_code[np.isfinite(input_max_code)]
+        out_min_values = output_min_code[np.isfinite(output_min_code)]
+        out_max_values = output_max_code[np.isfinite(output_max_code)]
+        if len(in_min_values) and len(in_max_values) and len(out_min_values) and len(out_max_values):
+            in_min = int(np.min(in_min_values))
+            in_max = int(np.max(in_max_values))
+            out_min = int(np.min(out_min_values))
+            out_max = int(np.max(out_max_values))
+            notes.append(
+                f'ADC原始码范围: PA0 {in_min}..{in_max}，PA1 {out_min}..{out_max}。'
+            )
+            if out_min <= 4 or out_max >= 4091:
+                notes.append('PA1 原始码已经触边，串口读数不是解析错，而是输出通道发生削顶或偏置/接线异常。')
+            if in_min <= 4 or in_max >= 4091:
+                notes.append('PA0 原始码已经触边，请降低 DAC 幅度或检查 DA1/AD1 同点连接。')
+    elif adc_code_range is not None:
+        adc_code_range = np.asarray(adc_code_range, dtype=float).flatten()
+        if len(adc_code_range) >= 4:
+            in_min, in_max, out_min, out_max = [int(round(x)) for x in adc_code_range[:4]]
+            notes.append(
+                f'ADC原始码范围: PA0 {in_min}..{in_max}，PA1 {out_min}..{out_max}。'
+            )
+            if out_min <= 4 or out_max >= 4091:
+                notes.append('PA1 原始码已经触边，串口读数不是解析错，而是输出通道发生削顶或偏置/接线异常。')
+            if in_min <= 4 or in_max >= 4091:
+                notes.append('PA0 原始码已经触边，请降低 DAC 幅度或检查 DA1/AD1 同点连接。')
+
+    if clip_point_count is not None:
+        clip_point_count = np.asarray(clip_point_count, dtype=float).flatten()
+        if len(clip_point_count) >= 2 and np.all(np.isfinite(clip_point_count[:2])):
+            notes.append(
+                f'削顶频点统计: PA0 {int(round(clip_point_count[0]))} 个，PA1 {int(round(clip_point_count[1]))} 个。'
+            )
 
     if input_dc is not None and output_dc is not None:
         in_dc_med = float(np.median(input_dc))
@@ -195,19 +292,28 @@ def summarize_measurement_diagnostics(
             )
 
     if valid_count is not None and len(valid_count):
-        min_valid = int(np.min(valid_count))
-        if min_valid < 2:
-            notes.append(f'有效采集次数最低为 {min_valid}，部分频点抗噪不足；建议复测或降低步进/幅度。')
+        finite_valid_count = np.asarray(valid_count, dtype=float)
+        finite_valid_count = finite_valid_count[np.isfinite(finite_valid_count)]
+        if len(finite_valid_count):
+            min_valid = int(np.min(finite_valid_count))
+            if min_valid < 2:
+                notes.append(f'有效采集次数最低为 {min_valid}，部分频点抗噪不足；建议复测或降低步进/幅度。')
 
     if mag_repeat_span is not None and len(mag_repeat_span):
-        notes.append(
-            f'重复采集幅值稳定性: 中位跨度 {float(np.median(mag_repeat_span)):.3f} dB，最大跨度 {float(np.max(mag_repeat_span)):.3f} dB。'
-        )
+        finite_mag_repeat_span = np.asarray(mag_repeat_span, dtype=float)
+        finite_mag_repeat_span = finite_mag_repeat_span[np.isfinite(finite_mag_repeat_span)]
+        if len(finite_mag_repeat_span):
+            notes.append(
+                f'重复采集幅值稳定性: 中位跨度 {float(np.median(finite_mag_repeat_span)):.3f} dB，最大跨度 {float(np.max(finite_mag_repeat_span)):.3f} dB。'
+            )
 
     if phase_repeat_span is not None and len(phase_repeat_span):
-        notes.append(
-            f'重复采集相位稳定性: 中位跨度 {float(np.median(np.abs(phase_repeat_span))):.4f} rad，最大跨度 {float(np.max(np.abs(phase_repeat_span))):.4f} rad。'
-        )
+        finite_phase_repeat_span = np.asarray(phase_repeat_span, dtype=float)
+        finite_phase_repeat_span = finite_phase_repeat_span[np.isfinite(finite_phase_repeat_span)]
+        if len(finite_phase_repeat_span):
+            notes.append(
+                f'重复采集相位稳定性: 中位跨度 {float(np.median(np.abs(finite_phase_repeat_span))):.4f} rad，最大跨度 {float(np.max(np.abs(finite_phase_repeat_span))):.4f} rad。'
+            )
 
     if actual_freq is not None and adc_sample_rate is not None and dac_sample_rate is not None:
         notes.append(
@@ -228,6 +334,9 @@ def aligned_diagnostics(
     aligned: dict[str, np.ndarray] = {}
     for key, value in diagnostics.items():
         arr = np.asarray(value, dtype=float).flatten()
+        if key in COMPACT_DIAGNOSTIC_KEYS:
+            aligned[key] = arr
+            continue
         if len(arr) < expected_len:
             continue
         arr = arr[:expected_len]
@@ -237,11 +346,112 @@ def aligned_diagnostics(
     return aligned
 
 
+def describe_invalid_measurement_frame(
+    omega: np.ndarray,
+    magnitude: np.ndarray,
+    phase_rad: np.ndarray,
+    diagnostics: dict[str, np.ndarray] | None,
+    min_valid_points: int = MIN_VALID_ANALYSIS_POINTS,
+) -> tuple[bool, list[str], int]:
+    diag = aligned_diagnostics(diagnostics, len(omega))
+    omega = np.asarray(omega, dtype=float).flatten()
+    magnitude = np.asarray(magnitude, dtype=float).flatten()
+    phase_rad = np.asarray(phase_rad, dtype=float).flatten()
+    n = min(len(omega), len(magnitude), len(phase_rad))
+    if n == 0:
+        return True, ['测量帧为空，无法分析系统类型。'], 0
+
+    omega = omega[:n]
+    magnitude = magnitude[:n]
+    phase_rad = phase_rad[:n]
+    valid = (
+        np.isfinite(omega)
+        & np.isfinite(magnitude)
+        & np.isfinite(phase_rad)
+        & (omega > 0.0)
+        & (magnitude > 0.0)
+    )
+
+    clip_flags = diag.get('clip_flags')
+    clipped_points = 0
+    output_clipped = 0
+    input_clipped = 0
+    if clip_flags is not None and len(clip_flags) >= n:
+        clip_flags = np.asarray(clip_flags[:n], dtype=float)
+        input_clipped = int(np.count_nonzero((clip_flags.astype(int) & 0x01) != 0))
+        output_clipped = int(np.count_nonzero((clip_flags.astype(int) & 0x02) != 0))
+        clipped_points = int(np.count_nonzero(clip_flags))
+        valid &= clip_flags == 0
+
+    valid_count = diag.get('valid_capture_count')
+    if valid_count is not None and len(valid_count) >= n:
+        valid_count = np.asarray(valid_count[:n], dtype=float)
+        valid &= valid_count >= 1
+
+    input_rms = diag.get('input_rms_v')
+    if input_rms is not None and len(input_rms) >= n:
+        input_rms = np.asarray(input_rms[:n], dtype=float)
+        valid &= input_rms >= 0.02
+
+    valid_points = int(np.count_nonzero(valid))
+    if valid_points >= int(min_valid_points):
+        return False, [], valid_points
+
+    notes = [
+        f'有效频点不足：当前只有 {valid_points}/{n} 个点可用于系统识别，至少需要 {int(min_valid_points)} 个。',
+    ]
+    zero_mag_count = int(np.count_nonzero(np.isfinite(magnitude) & (magnitude <= 0.0)))
+    if zero_mag_count:
+        notes.append(f'Magnitude_data 中有 {zero_mag_count}/{n} 个点为 0 或负值，无法形成可用的 Bode 幅频曲线。')
+
+    if clipped_points:
+        notes.append(f'ADC 削顶频点 {clipped_points}/{n} 个，其中 PA0={input_clipped} 个，PA1={output_clipped} 个。')
+    else:
+        clip_point_count = diag.get('clip_point_count')
+        if clip_point_count is not None:
+            clip_point_count = np.asarray(clip_point_count, dtype=float).flatten()
+            if len(clip_point_count) >= 2:
+                notes.append(
+                    f'削顶频点统计：PA0={int(round(clip_point_count[0]))} 个，'
+                    f'PA1={int(round(clip_point_count[1]))} 个。'
+                )
+
+    adc_code_range = diag.get('adc_code_range')
+    if adc_code_range is not None:
+        adc_code_range = np.asarray(adc_code_range, dtype=float).flatten()
+        if len(adc_code_range) >= 4:
+            in_min, in_max, out_min, out_max = [int(round(x)) for x in adc_code_range[:4]]
+            notes.append(f'ADC原始码范围：PA0 {in_min}..{in_max}，PA1 {out_min}..{out_max}。')
+            if out_min <= 4 or out_max >= 4091:
+                notes.append('PA1 输出通道已经贴近 0V/3.3V 边界；这不是三阶识别算法能修正的数据。')
+
+    output_dc = diag.get('output_dc_v')
+    if output_dc is not None and len(output_dc) >= n:
+        output_dc = np.asarray(output_dc[:n], dtype=float)
+        if len(output_dc):
+            out_dc_med = float(np.nanmedian(output_dc))
+            notes.append(f'PA1 输出 DC 中位数约 {out_dc_med:.3f} V。')
+            if out_dc_med < 0.35 or out_dc_med > 2.95:
+                notes.append('PA1 偏置不在 STM32 ADC 中间区，建议检查输出节点偏置/接线，并把高通、带通、运放输出偏到约 1.65V。')
+
+    output_rms = diag.get('output_rms_v')
+    if output_rms is not None and len(output_rms) >= n:
+        output_rms = np.asarray(output_rms[:n], dtype=float)
+        notes.append(f'PA1 输出 RMS 中位数约 {float(np.nanmedian(output_rms)):.4f} V。')
+
+    notes.append('本帧已拒绝判阶；请先修正 PA1 输出削顶/接线/偏置后重新扫频。')
+    return True, notes, valid_points
+
+
 def merge_measurement_frames(
-    frames: list[tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, np.ndarray] | None]],
+    frames: list,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, np.ndarray]]:
     valid_frames = []
-    for omega, magnitude, phase, diagnostics in frames:
+    for frame in frames:
+        if hasattr(frame, 'as_legacy_tuple'):
+            omega, magnitude, phase, diagnostics = frame.as_legacy_tuple()
+        else:
+            omega, magnitude, phase, diagnostics = frame
         omega = np.asarray(omega, dtype=float).flatten()
         magnitude = np.asarray(magnitude, dtype=float).flatten()
         phase = np.asarray(phase, dtype=float).flatten()
@@ -256,14 +466,19 @@ def merge_measurement_frames(
     omega_all = np.concatenate([item[0] for item in valid_frames])
     mag_all = np.concatenate([item[1] for item in valid_frames])
     phase_all = np.concatenate([item[2] for item in valid_frames])
-    diag_all: dict[str, list[np.ndarray]] = {key: [] for key in DIAGNOSTIC_PATTERNS}
+    diag_all: dict[str, list[np.ndarray]] = {key: [] for key in PER_POINT_DIAGNOSTIC_KEYS}
+    compact_diag: dict[str, list[np.ndarray]] = {key: [] for key in COMPACT_DIAGNOSTIC_KEYS}
     for omega, _, _, diagnostics in valid_frames:
-        for key in DIAGNOSTIC_PATTERNS:
+        for key in PER_POINT_DIAGNOSTIC_KEYS:
             arr = diagnostics.get(key)
             if arr is None or len(arr) != len(omega):
                 diag_all[key].append(np.full(len(omega), np.nan, dtype=float))
             else:
                 diag_all[key].append(np.asarray(arr, dtype=float))
+        for key in COMPACT_DIAGNOSTIC_KEYS:
+            arr = diagnostics.get(key)
+            if arr is not None:
+                compact_diag[key].append(np.asarray(arr, dtype=float).flatten())
 
     order = np.argsort(omega_all)
     omega_all = omega_all[order]
@@ -284,6 +499,22 @@ def merge_measurement_frames(
     for key, chunks in diag_all.items():
         if chunks:
             merged_diag[key] = np.concatenate(chunks)[order][keep]
+    if compact_diag['adc_code_range']:
+        ranges = [arr for arr in compact_diag['adc_code_range'] if len(arr) >= 4]
+        if ranges:
+            merged_diag['adc_code_range'] = np.array([
+                min(float(arr[0]) for arr in ranges),
+                max(float(arr[1]) for arr in ranges),
+                min(float(arr[2]) for arr in ranges),
+                max(float(arr[3]) for arr in ranges),
+            ], dtype=float)
+    if compact_diag['clip_point_count']:
+        counts = [arr for arr in compact_diag['clip_point_count'] if len(arr) >= 2]
+        if counts:
+            merged_diag['clip_point_count'] = np.array([
+                sum(float(arr[0]) for arr in counts),
+                sum(float(arr[1]) for arr in counts),
+            ], dtype=float)
 
     return omega_all[keep], mag_all[keep], phase_all[keep], merged_diag
 
@@ -322,7 +553,7 @@ def apply_measurement_quality_mask(
     if removed <= 0:
         return omega, magnitude, phase_rad, diag, notes
 
-    if np.count_nonzero(valid) < 5:
+    if np.count_nonzero(valid) < MIN_VALID_ANALYSIS_POINTS:
         notes.append(
             f'质量筛选发现 {removed} 个无效/削顶/参考过小频点，但剩余点数不足；保留原始数据并将判阶标为低可信。'
         )
@@ -330,10 +561,60 @@ def apply_measurement_quality_mask(
 
     notes.append(f'质量筛选剔除了 {removed} 个无效/削顶/参考过小频点，再进行类型和阶数判断。')
     filtered_diag = {
-        key: value[valid] if len(value) == len(valid) else value
+        key: value[valid] if key not in COMPACT_DIAGNOSTIC_KEYS and len(value) == len(valid) else value
         for key, value in diag.items()
     }
     return omega[valid], magnitude[valid], phase_rad[valid], filtered_diag, notes
+
+
+def trim_lowpass_noise_floor_for_analysis(
+    omega: np.ndarray,
+    magnitude: np.ndarray,
+    phase_rad: np.ndarray,
+    diagnostics: dict[str, np.ndarray] | None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, np.ndarray], list[str]]:
+    notes: list[str] = []
+    diag = aligned_diagnostics(diagnostics, len(omega))
+    output_rms = diag.get('output_rms_v')
+    if output_rms is None or len(output_rms) != len(omega) or len(omega) < LOWPASS_NOISE_FLOOR_MIN_KEEP_POINTS:
+        return omega, magnitude, phase_rad, diag, notes
+
+    output_rms = np.asarray(output_rms, dtype=float)
+    mag_db = 20.0 * np.log10(np.clip(magnitude, 1e-12, None))
+    passband_count = max(3, min(8, len(mag_db) // 6))
+    passband_db = float(np.median(mag_db[:passband_count]))
+    low_output = (
+        np.isfinite(output_rms)
+        & (output_rms <= LOWPASS_OUTPUT_NOISE_FLOOR_RMS_V)
+        & (mag_db <= passband_db - LOWPASS_NOISE_FLOOR_DROP_DB)
+    )
+
+    if not np.any(low_output):
+        return omega, magnitude, phase_rad, diag, notes
+
+    first_low = int(np.argmax(low_output))
+    tail_mask = np.zeros(len(omega), dtype=bool)
+    tail_mask[first_low:] = low_output[first_low:]
+
+    keep = ~tail_mask
+    removed = int(np.count_nonzero(tail_mask))
+    if removed < LOWPASS_NOISE_FLOOR_MIN_REMOVE_POINTS:
+        return omega, magnitude, phase_rad, diag, notes
+    if int(np.count_nonzero(keep)) < LOWPASS_NOISE_FLOOR_MIN_KEEP_POINTS:
+        notes.append(
+            f'低通高频端有 {removed} 个点的 PA1 输出接近 ADC 噪声底，但保留后点数不足，暂不剔除。'
+        )
+        return omega, magnitude, phase_rad, diag, notes
+
+    filtered_diag = {
+        key: value[keep] if key not in COMPACT_DIAGNOSTIC_KEYS and len(value) == len(keep) else value
+        for key, value in diag.items()
+    }
+    notes.append(
+        f'低通高频端剔除了 {removed} 个 PA1 输出小于 {LOWPASS_OUTPUT_NOISE_FLOOR_RMS_V * 1000:.0f} mVrms '
+        '且已低于通带 30 dB 的噪声底点，避免用 ADC 噪声尾巴判阶。'
+    )
+    return omega[keep], magnitude[keep], phase_rad[keep], filtered_diag, notes
 
 
 def matlab_smooth(y: np.ndarray, window_length: int, polyorder: int) -> np.ndarray:
@@ -799,13 +1080,21 @@ def estimate_system_order_from_fit(
     slope_order = estimate_order_from_slope(slope_tail)
     mag_db = 20.0 * np.log10(np.clip(magnitude, 1e-12, None))
     mag_span_db = float(np.max(mag_db) - np.min(mag_db)) if len(mag_db) else 0.0
-    order_estimate = max(mag_order, slope_order, 1)
+    order_estimate = max(mag_order, 1)
     delay_artifact_guarded = False
     if slope_order:
         notes.append(f'低通高频尾部斜率支持 {slope_order} 阶；斜率约 {slope_tail:.1f} dB/dec。')
 
     if phase_fit['reliable']:
         phase_order = int(phase_fit['order'])
+        consensus_order = max(mag_order, phase_order, 1)
+        if slope_order > consensus_order:
+            notes.append(
+                f'尾部斜率单独像 {slope_order} 阶，但幅值模板和相位拟合共同支持 {consensus_order} 阶；'
+                '高频端接近噪声底时不让斜率把阶数抬高。'
+            )
+        elif slope_order > order_estimate:
+            order_estimate = slope_order
         delay_phase_fit = fit_lowpass_order_from_phase_with_delay(
             omega,
             phase_deg,
@@ -841,6 +1130,12 @@ def estimate_system_order_from_fit(
             notes.append(
                 f'原始相位拟合看起来像 {phase_order} 阶，但低通相位很容易被运放/采样延迟额外拉低；物理阶数保持在幅值模板和尾部斜率共同支持的 {order_estimate} 阶。'
             )
+        if order_estimate > consensus_order and slope_order >= order_estimate:
+            order_estimate = consensus_order
+            notes.append(
+                f'最终低通阶数按幅值/相位一致证据限制为 {consensus_order} 阶；'
+                '尾部斜率只作为提示，不单独显示更高阶。'
+            )
         if delay_artifact_guarded:
             notes.append(
                 f'未补偿延迟的相位拟合会偏向 {phase_order} 阶，但已被延迟补偿相位拟合否决；最终按 {order_estimate} 阶低通判定。'
@@ -854,6 +1149,13 @@ def estimate_system_order_from_fit(
             )
     else:
         quality = phase_fit['quality']
+        if slope_order > order_estimate and slope_order <= mag_order + 1 and mag_span_db >= 18.0:
+            order_estimate = slope_order
+        elif slope_order > mag_order + 1:
+            notes.append(
+                f'尾部斜率单独像 {slope_order} 阶，但相位质量不足且幅值模板只支持 {mag_order} 阶；'
+                '不把噪声底/运放高频滚降当作额外物理阶数。'
+            )
         notes.append(
             f'低通幅值模板拟合优先 {mag_order} 阶；幅值 RMSE = {float(mag_fit["rmse_db"]):.2f} dB。'
         )
@@ -1049,7 +1351,7 @@ def assess_identification_reliability(
             )
         elif not edge_ok:
             notes.append(
-                f'截止点两侧覆盖不足：左侧 {left_span:.2f} decade，右侧 {right_span:.2f} decade；阶数只能作为疑似结果。'
+                f'截止点两侧覆盖不足：左侧 {left_span:.2f} decade，右侧 {right_span:.2f} decade；建议复测确认阶数。'
             )
     elif filter_type in ('bandpass', 'bandstop'):
         left_cut = float(filter_info.get('left_cutoff_omega', 0.0) or 0.0)
@@ -1071,34 +1373,44 @@ def assess_identification_reliability(
     has_diag_problem = False
     clip_flags = diag.get('clip_flags')
     if clip_flags is not None and len(clip_flags):
-        clipped = int(np.count_nonzero(clip_flags))
+        finite_clip_flags = np.asarray(clip_flags, dtype=float)
+        finite_clip_flags = finite_clip_flags[np.isfinite(finite_clip_flags)]
+        clipped = int(np.count_nonzero(finite_clip_flags)) if len(finite_clip_flags) else 0
         if clipped:
             has_diag_problem = True
-            notes.append(f'仍有 {clipped} 个频点带 ADC 削顶标志，阶数判断降级为疑似。')
+            notes.append(f'仍有 {clipped} 个频点带 ADC 削顶标志，建议复测确认阶数。')
 
     valid_count = diag.get('valid_capture_count')
-    if valid_count is not None and len(valid_count) and float(np.min(valid_count)) < 2:
-        has_diag_problem = True
-        notes.append('部分频点有效重复采集次数少于 2 次，建议复测后再确认阶数。')
+    if valid_count is not None and len(valid_count):
+        finite_valid_count = np.asarray(valid_count, dtype=float)
+        finite_valid_count = finite_valid_count[np.isfinite(finite_valid_count)]
+        if len(finite_valid_count) and float(np.min(finite_valid_count)) < 2:
+            has_diag_problem = True
+            notes.append('部分频点有效重复采集次数少于 2 次，建议复测后再确认阶数。')
 
     input_rms = diag.get('input_rms_v')
-    if input_rms is not None and len(input_rms) and float(np.median(input_rms)) < 0.03:
-        has_diag_problem = True
-        notes.append('输入参考 RMS 中位数低于 30 mV，Vout/Vin 对噪声过敏，阶数判断降级。')
+    if input_rms is not None and len(input_rms):
+        finite_input_rms = np.asarray(input_rms, dtype=float)
+        finite_input_rms = finite_input_rms[np.isfinite(finite_input_rms)]
+        if len(finite_input_rms) and float(np.median(finite_input_rms)) < 0.03:
+            has_diag_problem = True
+            notes.append('输入参考 RMS 中位数低于 30 mV，Vout/Vin 对噪声过敏，阶数判断降级。')
 
     mag_repeat_span = diag.get('magnitude_repeat_span_db')
     if mag_repeat_span is not None and len(mag_repeat_span):
         mag_repeat_span = np.asarray(mag_repeat_span[:point_count], dtype=float)
-        if float(np.nanmedian(mag_repeat_span)) > 0.8 or float(np.nanmax(mag_repeat_span)) > 2.5:
+        mag_repeat_span = mag_repeat_span[np.isfinite(mag_repeat_span)]
+        if len(mag_repeat_span) and (float(np.nanmedian(mag_repeat_span)) > 0.8 or float(np.nanmax(mag_repeat_span)) > 2.5):
             has_diag_problem = True
             notes.append('重复采集幅值离散过大，说明该次扫频不稳定；建议降低幅度或复测。')
 
     phase_repeat_span = diag.get('phase_repeat_span_rad')
     if phase_repeat_span is not None and len(phase_repeat_span):
         phase_repeat_span = np.abs(np.asarray(phase_repeat_span[:point_count], dtype=float))
-        if float(np.nanmedian(phase_repeat_span)) > 0.12 or float(np.nanmax(phase_repeat_span)) > 0.45:
+        phase_repeat_span = phase_repeat_span[np.isfinite(phase_repeat_span)]
+        if len(phase_repeat_span) and (float(np.nanmedian(phase_repeat_span)) > 0.12 or float(np.nanmax(phase_repeat_span)) > 0.45):
             has_diag_problem = True
-            notes.append('重复采集相位离散过大，阶数和相位裕度判断降级为疑似。')
+            notes.append('重复采集相位离散过大，建议复测确认阶数。')
 
     if filter_type == 'highpass':
         primary_omega = float(filter_info.get('primary_omega', 0.0) or 0.0)
@@ -1121,10 +1433,9 @@ def assess_identification_reliability(
                 very_low_mask = omega[:point_count] <= primary_omega * 0.20
                 low_output = output_rms[very_low_mask & np.isfinite(output_rms)]
                 if len(low_output) and float(np.median(low_output)) < 0.003:
-                    has_diag_problem = True
                     notes.append(
                         '高通低频输出 RMS 已接近 STM32 ADC 噪声/量化底，'
-                        '高阶斜率可能被噪声地板压平成一阶；请提高幅度、降低截止频率或分段加密扫频。'
+                        '该项仅作为测量质量提醒；若斜率、模板拟合和相位跨度已支持当前阶次，不降级系统类型。'
                     )
 
     confidence = float(np.clip(confidence, 0.0, 1.0))
@@ -1150,9 +1461,9 @@ def assess_identification_reliability(
             f'幅值变化只有 {mag_span_db:.1f} dB，足够找局部截止点但不足以可靠区分一阶/二阶/高阶。'
         )
     if not reliable:
-        notes.append('本次阶数结论已标记为“疑似/需复测”，不会作为确定阶数使用。')
+        notes.append('测量质量提醒：本次数据存在覆盖或诊断限制，建议复测确认阶数。')
 
-    summary = '可靠' if reliable else '疑似/需复测'
+    summary = '可靠' if reliable else '需复测确认'
     return {
         'reliable': reliable,
         'confidence': confidence,
@@ -1310,10 +1621,7 @@ def format_filter_system_label(filter_type: str, order_estimate: int, reliable: 
     if filter_type == 'other':
         return f'{filter_label}\uff08\u65e0\u6cd5\u53ef\u9760\u5224\u9636\uff09'
 
-    label = f'{order_prefix}{filter_label}'
-    if reliable:
-        return label
-    return f'\u7591\u4f3c{label}\uff08\u9700\u590d\u6d4b\u786e\u8ba4\uff09'
+    return f'{order_prefix}{filter_label}'
 
 
 def evaluate_expected_circuit(result: 'SystemAnalysisResult', expected: str) -> str:
@@ -1327,7 +1635,7 @@ def evaluate_expected_circuit(result: 'SystemAnalysisResult', expected: str) -> 
     expected_type, expected_order = target
     type_ok = result.filter_type == expected_type
     order_ok = expected_order is None or result.order_estimate == expected_order
-    reliability_text = '可靠' if result.order_reliable else '疑似'
+    reliability_text = '可靠' if result.order_reliable else '需复测确认'
     if type_ok and order_ok:
         return f'期望电路匹配：{expected}；本次识别为{result.system_order}（{reliability_text}）。'
 
@@ -1335,6 +1643,12 @@ def evaluate_expected_circuit(result: 'SystemAnalysisResult', expected: str) -> 
     if expected_order is not None:
         expected_label = f'{expected_order}阶{expected_label}'
     measured_label = f'{result.order_estimate}阶{FILTER_TYPE_LABELS.get(result.filter_type, result.filter_type)}'
+    if expected_type == 'highpass' and result.filter_type == 'bandpass':
+        return (
+            f'期望电路不匹配：期望 {expected_label}，实测 {measured_label}。'
+            '曲线低频端像高通、但高频端又明显衰减，因此实测为带通形态；'
+            '请检查高通输出节点、1.65V 中点偏置以及高频端额外电容/连线/面包板寄生。'
+        )
     return f'期望电路不匹配：期望 {expected_label}，实测 {measured_label}；请先检查接线、偏置、扫频覆盖和削顶诊断。'
 
 
@@ -1358,6 +1672,97 @@ def build_identification_evidence(result: 'SystemAnalysisResult') -> list[str]:
     delay_compensated = any(('测量延迟' in note or '延迟补偿' in note) for note in result.notes)
     evidence.append(f'相位延迟补偿: {"已使用/已考虑" if delay_compensated else "未触发"}。')
     return evidence
+
+
+def normalize_phase_for_display(phase_deg: float, filter_type: str) -> float:
+    phase = float(phase_deg)
+    if not np.isfinite(phase):
+        return phase
+    return float(((phase + 180.0) % 360.0) - 180.0)
+
+
+def phase_array_for_display(phase_deg: np.ndarray, filter_type: str) -> np.ndarray:
+    phase = np.asarray(phase_deg, dtype=float)
+    if filter_type == 'highpass':
+        shifted = phase.copy()
+        finite = shifted[np.isfinite(shifted)]
+        if len(finite) and float(np.nanmedian(finite)) < -45.0:
+            shifted = shifted + 360.0
+        return shifted
+    return phase
+
+
+def _format_optional_omega(value: float | None) -> str:
+    return '无法计算' if value is None else f'{float(value):.2f} rad/s'
+
+
+def build_filter_report_lines(r: 'SystemAnalysisResult') -> list[str]:
+    cutoff_phase = normalize_phase_for_display(r.cutoff_phase_deg, r.filter_type)
+    max_mag_db = 20.0 * np.log10(max(r.max_magnitude, 1e-12))
+
+    lines = [
+        '=== 稳频仪：滤波器频响识别分析报告 ===',
+        f'系统类型: {r.system_order}',
+        f'滤波器族: {FILTER_TYPE_LABELS.get(r.filter_type, FILTER_TYPE_LABELS["other"])}',
+        f'估计阶次: {r.order_estimate}',
+        f'判阶可靠性: {r.identification_summary}（置信度 {r.identification_confidence:.2f}）',
+        f'期望电路: {getattr(r, "expected_circuit", "Auto")}',
+        f'期望匹配: {getattr(r, "expected_match_text", "未指定期望电路，按自动识别结果验收。")}',
+        f'数据点数: {len(r.omega)}',
+        f'截止/特征判据: {r.cutoff_method}',
+        '--- 识别证据 ---',
+    ]
+    lines.extend(build_identification_evidence(r))
+
+    diagnostic_notes = [
+        note for note in r.notes
+        if any(key in note for key in ('测量质量', '测量质量提醒', '峰峰值', '重复采集', '采样信息', '削顶', '偏置', 'RMS'))
+    ]
+    if diagnostic_notes:
+        lines.append('--- 测量质量诊断 ---')
+        lines.extend(diagnostic_notes[:8])
+
+    if r.filter_type in ('lowpass', 'highpass'):
+        lines.extend([
+            f'-3 dB 截止角频率 = {r.magnitude_cutoff_omega:.2f} rad/s',
+            f'特征频点相位 = {cutoff_phase:.2f} °',
+            f'幅频阈值 = {r.cutoff_mag_db:.2f} dB',
+            f'最大/通带幅值 = {r.max_magnitude:.4f} ({max_mag_db:.2f} dB)',
+        ])
+        if r.order_estimate == 1:
+            phase_target = '-45°' if r.filter_type == 'lowpass' else '+45°'
+            lines.append(
+                f'一阶相位 {phase_target} 参考角频率 = {_format_optional_omega(r.phase_cutoff_omega)}'
+            )
+    elif r.filter_type == 'bandpass':
+        lines.extend([
+            f'左侧 -3 dB 角频率 = {r.magnitude_cutoff_omega:.2f} rad/s',
+            f'右侧 -3 dB 角频率 = {_format_optional_omega(r.secondary_cutoff_omega)}',
+            f'中心角频率 ω0 = {r.omega_c:.2f} rad/s',
+            f'带宽 = {_format_optional_omega(r.bandwidth_omega)}',
+            f'峰值角频率 = {r.resonant_frequency:.2f} rad/s',
+            f'峰值幅值 = {r.max_magnitude:.4f} ({max_mag_db:.2f} dB)',
+            f'特征频点相位 = {cutoff_phase:.2f} °',
+        ])
+    elif r.filter_type == 'bandstop':
+        notch_mag = float(np.min(np.clip(r.mag_smooth, 1e-12, None)))
+        notch_depth_db = db_ratio(r.max_magnitude, notch_mag)
+        lines.extend([
+            f'左侧 -3 dB 角频率 = {r.magnitude_cutoff_omega:.2f} rad/s',
+            f'右侧 -3 dB 角频率 = {_format_optional_omega(r.secondary_cutoff_omega)}',
+            f'陷波角频率 ω0 = {r.omega_c:.2f} rad/s',
+            f'阻带宽度 = {_format_optional_omega(r.bandwidth_omega)}',
+            f'陷波深度 = {notch_depth_db:.1f} dB',
+            f'特征频点相位 = {cutoff_phase:.2f} °',
+        ])
+    else:
+        lines.extend([
+            f'主特征角频率 = {r.omega_c:.2f} rad/s',
+            f'特征频点相位 = {cutoff_phase:.2f} °',
+        ])
+
+    lines.append('')
+    return lines
 
 
 def classify_filter_response(
@@ -1431,10 +1836,6 @@ def classify_filter_response(
             f'Band-pass shape detected: peak gain exceeds both edges by {peak_edge_margin_db:.1f} dB.'
         )
         notes.extend(band_order_notes)
-        if phase_deg[0] > 30.0 and phase_deg[-1] < -20.0:
-            notes.append(
-                '曲线低频端像高通、但高频端又明显衰减，因此实测为带通形态；如果你预期是一阶 RC 高通，请检查 PA1 是否接在电容后的电阻输出节点、高通输出电阻是否接到 1.65V 中点偏置而不是直接接地，以及高频端是否被额外电容/连线/面包板寄生拖低。STM32 单电源 ADC 不能测围绕 0V 摆动的高通信号。'
-            )
     elif (
         is_valley_interior
         and notch_edge_margin_db >= 3.0
@@ -1480,7 +1881,8 @@ def classify_filter_response(
         notes.append(
             f'High-pass rise detected: low-frequency slope is about {head_slope:.1f} dB/dec.'
         )
-        if phase_deg[-1] < -20.0:
+        high_freq_phase_display = normalize_phase_for_display(phase_deg[-1], 'highpass')
+        if high_freq_phase_display < -20.0:
             notes.append(
                 '高通高频端相位仍明显为负，可能存在额外延迟或高频滚降；理想一阶 RC 高通的高频相位应逐渐接近 0°。'
             )
@@ -1736,7 +2138,7 @@ def analyze_system(
         phase_cutoff_omega, phase_cutoff_index = estimate_first_order_phase_cutoff(omega, phase_deg)
         if phase_cutoff_omega is not None and phase_cutoff_index is not None:
             phase_mag_delta = abs(float(phase_cutoff_omega) - float(magnitude_cutoff_omega)) / max(float(magnitude_cutoff_omega), 1e-12)
-            notes.append('一阶系统已同时计算幅值 -3 dB 和相位 -45° 截止点；主截止角频率采用通用的幅值 -3 dB 定义。')
+            notes.append('一阶低通已同时计算幅值 -3 dB 和相位 -45° 截止点；主截止角频率采用通用的幅值 -3 dB 定义。')
             if phase_mag_delta > 0.08:
                 notes.append(f'幅值 -3 dB 与相位 -45° 截止点相差 {phase_mag_delta * 100.0:.1f}%，建议优先看 -3 dB 幅值结果并检查相位偏差来源。')
         else:
@@ -1871,6 +2273,16 @@ def analyze_system_v2(
     omega = omega[:min_len]
     magnitude_data = magnitude_data[:min_len]
     phase_data_rad = np.unwrap(phase_data_rad[:min_len])
+    diagnostics = aligned_diagnostics(diagnostics, min_len)
+
+    invalid_frame, invalid_notes, _ = describe_invalid_measurement_frame(
+        omega,
+        magnitude_data,
+        phase_data_rad,
+        diagnostics,
+    )
+    if invalid_frame:
+        raise ValueError('\n'.join(invalid_notes))
 
     if invert_transfer:
         magnitude_data = 1.0 / np.clip(magnitude_data, 1e-12, None)
@@ -1899,6 +2311,22 @@ def analyze_system_v2(
         diagnostics,
     )
     notes.extend(quality_mask_notes)
+
+    lowpass_hint = False
+    if len(magnitude_data) >= 5:
+        edge = max(3, min(8, len(magnitude_data) // 8))
+        low_gain_hint = float(np.median(magnitude_data[:edge]))
+        high_gain_hint = float(np.median(magnitude_data[-edge:]))
+        lowpass_hint = db_ratio(low_gain_hint, high_gain_hint) >= 12.0
+
+    if lowpass_hint:
+        omega, magnitude_data, phase_data_rad, diagnostics, noise_floor_notes = trim_lowpass_noise_floor_for_analysis(
+            omega,
+            magnitude_data,
+            phase_data_rad,
+            diagnostics,
+        )
+        notes.extend(noise_floor_notes)
 
     magnitude_for_analysis = magnitude_data.copy()
     phase_for_analysis = phase_data_rad.copy()
@@ -2020,6 +2448,21 @@ def analyze_system_v2(
                 )
         else:
             notes.append('\u672a\u627e\u5230 -45\u00b0 \u76f8\u4f4d\u4ea4\u70b9\uff0c\u622a\u6b62\u89d2\u9891\u7387\u4fdd\u6301\u4e3a\u5e45\u9891 -3 dB \u7ed3\u679c\u3002')
+    elif filter_type == 'highpass' and order_estimate <= 1:
+        phase_cutoff_omega, phase_cutoff_index = estimate_first_order_phase_cutoff(
+            omega,
+            phase_deg,
+            target_phase_deg=45.0,
+        )
+        if phase_cutoff_omega is not None and phase_cutoff_index is not None:
+            phase_mag_delta = abs(float(phase_cutoff_omega) - float(magnitude_cutoff_omega)) / max(float(magnitude_cutoff_omega), 1e-12)
+            notes.append(
+                '一阶高通额外计算了 +45° 相位参考点，优先以幅频 -3 dB 结果为准。'
+            )
+            if phase_mag_delta > 0.08:
+                notes.append(
+                    f'幅频 -3 dB 与相位 +45° 参考点相差 {phase_mag_delta * 100.0:.1f}%，请检查接线方向和扫频范围。'
+                )
 
     cutoff_index = nearest_index(omega, omega_c)
     cutoff_phase_deg = float(phase_deg[cutoff_index])
@@ -2053,11 +2496,6 @@ def analyze_system_v2(
     nyquist_encirclements_cw = -nyquist_winding_ccw
     estimated_closed_loop_rhp_poles = assumed_open_loop_rhp_poles + nyquist_encirclements_cw
     nyquist_stable = (estimated_closed_loop_rhp_poles == 0)
-    notes.append(
-        f'Nyquist \u5224\u636e\uff1aN(\u987a\u65f6\u9488\u5305\u56f4\u6570)={nyquist_encirclements_cw}\uff0c'
-        f'P(\u5f00\u73af\u53f3\u534a\u5e73\u9762\u6781\u70b9\u6570)={assumed_open_loop_rhp_poles}\uff0c'
-        f'Z=P+N={estimated_closed_loop_rhp_poles}\u3002'
-    )
 
     score = 0
     if nyquist_stable:
@@ -2265,7 +2703,7 @@ class MatlabExactApp:
         ys.pack(side='right', fill='y')
         self.text.configure(yscrollcommand=ys.set)
 
-        self.text.insert('end', '稳频仪已就绪\n支持自动扫频、伯德图、奈奎斯特图、N/P/Z 稳定性判据、增益裕度和相位裕度分析。\n\n')
+        self.text.insert('end', '稳频仪已就绪\n支持自动扫频、伯德图、滤波器类型/阶次/截止频率识别；Nyquist 图保留用于高级查看。\n\n')
 
     def log(self, msg: str):
         self.text.insert('end', f'[{time.strftime("%H:%M:%S")}] {msg}\n')
@@ -2279,40 +2717,27 @@ class MatlabExactApp:
         self.status_var.set('未检测到串口' if not ports else f'检测到 {len(ports)} 个串口')
         self.log(f'串口列表: {ports if ports else "无"}')
 
-    def _build_sweep_command(self):
+    def _build_sweep_command(self, show_errors=True):
         try:
             f_start = float(self.f_start_var.get().strip())
             f_stop = float(self.f_stop_var.get().strip())
             f_step = float(self.f_step_var.get().strip())
             amp = float(self.amp_var.get().strip())
         except ValueError:
-            messagebox.showwarning('提示', '扫频参数格式不正确。')
+            if show_errors:
+                messagebox.showwarning('提示', '扫频参数格式不正确。')
             return None
 
         if f_start <= 0 or f_stop < f_start or f_step <= 0:
-            messagebox.showwarning('提示', '频率范围不正确。')
+            if show_errors:
+                messagebox.showwarning('提示', '频率范围不正确。')
             return None
         if amp <= 0 or amp > 3.0:
-            messagebox.showwarning('提示', '幅度建议设置在 0 到 3.0 Vpp 之间。')
+            if show_errors:
+                messagebox.showwarning('提示', '幅度建议设置在 0 到 3.0 Vpp 之间。')
             return None
 
-        return f'SWEEP {f_start:g} {f_stop:g} {f_step:g} {amp:g}\n'
-
-    def _build_sweep_command_quiet(self):
-        try:
-            f_start = float(self.f_start_var.get().strip())
-            f_stop = float(self.f_stop_var.get().strip())
-            f_step = float(self.f_step_var.get().strip())
-            amp = float(self.amp_var.get().strip())
-        except ValueError:
-            return None
-
-        if f_start <= 0 or f_stop < f_start or f_step <= 0:
-            return None
-        if amp <= 0 or amp > 3.0:
-            return None
-
-        return f'SWEEP {f_start:g} {f_stop:g} {f_step:g} {amp:g}\n'
+        return build_sweep_command(f_start, f_stop, f_step, amp)
 
     def _get_assumed_open_loop_poles(self):
         try:
@@ -2347,7 +2772,7 @@ class MatlabExactApp:
             messagebox.showwarning('提示', '参数格式不正确。')
             return
 
-        fallback_command = command if command is not None else self._build_sweep_command_quiet()
+        fallback_command = command if command is not None else self._build_sweep_command(show_errors=False)
 
         self.stop_event.clear()
         self.reader = ThreeLineReader(
@@ -2440,16 +2865,25 @@ class MatlabExactApp:
         if assumed_p is None:
             return
 
-        result = analyze_system_v2(
-            omega, mag, phase,
-            smooth=self.smooth_var.get(),
-            window_length=int(self.window_var.get().strip()),
-            polyorder=int(self.poly_var.get().strip()),
-            fix_g431_axis=self.fix_var.get(),
-            assumed_open_loop_rhp_poles=assumed_p,
-            invert_transfer=self.swap_io_var.get(),
-            diagnostics=diagnostics
-        )
+        try:
+            result = analyze_system_v2(
+                omega, mag, phase,
+                smooth=self.smooth_var.get(),
+                window_length=int(self.window_var.get().strip()),
+                polyorder=int(self.poly_var.get().strip()),
+                fix_g431_axis=self.fix_var.get(),
+                assumed_open_loop_rhp_poles=assumed_p,
+                invert_transfer=self.swap_io_var.get(),
+                diagnostics=diagnostics
+            )
+        except ValueError as exc:
+            self.result = None
+            self.system_type_var.set('本帧无效')
+            self.status_var.set(f'{source} 无法判阶')
+            message = str(exc)
+            self.log(f'{source} 无法判阶：{message}')
+            messagebox.showwarning('测量帧无效', message)
+            return
         expected = getattr(self, 'expected_circuit_var', tk.StringVar(value='Auto')).get().strip() or 'Auto'
         result.expected_circuit = expected
         result.expected_match_text = evaluate_expected_circuit(result, expected)
@@ -2466,47 +2900,7 @@ class MatlabExactApp:
         self.update_plots(result)
 
     def append_report(self, r: SystemAnalysisResult):
-        gm_text = '无法计算' if r.gain_margin_db is None else f'{r.gain_margin_db:.2f} dB'
-        pm_text = '无法计算' if r.phase_margin is None else f'{r.phase_margin:.2f} °'
-        stable_text = '稳定' if r.nyquist_stable else '不稳定'
-
-        lines = [
-            '=== 稳频仪：频响与奈奎斯特稳定性分析报告 ===',
-            f'截止判据: {r.cutoff_method}',
-            f'幅值 -3 dB 角频率: {r.magnitude_cutoff_omega:.2f} rad/s',
-            f'相位 -45° 角频率: {"无法计算" if r.phase_cutoff_omega is None else f"{r.phase_cutoff_omega:.2f} rad/s"}',
-            f'系统类型: {r.system_order}',
-            f'估计阶次: {r.order_estimate}',
-            f'数据点数: {len(r.omega)}',
-            f'截止角频率 ωc = {r.omega_c:.2f} rad/s',
-            f'截止点相位 = {r.cutoff_phase_deg:.2f} °',
-            f'最大幅值 = {r.max_magnitude:.4f} ({20*np.log10(max(r.max_magnitude,1e-12)):.2f} dB)',
-            f'谐振频率 ≈ {r.resonant_frequency:.2f} rad/s',
-            f'到 (-1,0) 最小距离: {r.min_distance:.4f}',
-            f'Nyquist 穿越点数（近似）: {len(r.crossing_points)}',
-            f'Nyquist 逆时针包围数: {r.nyquist_winding_ccw}',
-            f'Nyquist 顺时针包围数 N: {r.nyquist_encirclements_cw}',
-            f'开环右半平面极点数 P: {r.assumed_open_loop_rhp_poles}',
-            f'闭环右半平面极点数 Z = P + N: {r.estimated_closed_loop_rhp_poles}',
-            f'奈奎斯特判据稳定性: {stable_text}',
-            f'增益裕度: {gm_text}',
-            f'相位裕度: {pm_text}',
-            ''
-        ]
-
-        if r.order_estimate == 2 and r.damping_ratio is not None:
-            lines += [
-                '--- 二阶系统特征参数 ---',
-                f'阻尼比 ζ = {r.damping_ratio:.4f}',
-                f'自然频率 ωn = {r.natural_frequency:.2f} rad/s',
-                f'超调量 = {r.overshoot_percent:.2f}%' if r.overshoot_percent is not None else '超调量 = 无法计算',
-                f'调节时间(2%) ≈ {r.settling_time_est:.3f} s' if r.settling_time_est is not None else '调节时间 = 无法计算',
-                ''
-            ]
-
-        lines.append(f'稳定性综合判定: {r.stability_text} (得分 {r.stability_score}/6)')
-        lines.append('')
-
+        lines = build_filter_report_lines(r)
         self.text.insert('end', '\n'.join(lines))
         self.text.see('end')
 
@@ -2721,57 +3115,35 @@ class ThreeLineReader(threading.Thread):
             self.out_queue.put(('log', f'已连接串口 {self.port} @ {self.baudrate}'))
             self.out_queue.put(('log', '按兼容协议读取：必需三行 omega / Magnitude_data / Phase_data_rad，若存在则继续读取诊断数组。'))
 
-            passive_deadline = time.monotonic() + max(0.8, self.timeout_sec * 2.5)
             fallback_sent = bool(self.command)
             if not self.command and self.fallback_command:
                 self.out_queue.put(('log', '兼容模式：先等旧版自动三行输出，超时后自动补发 SWEEP。'))
 
             while not self.stop_event.is_set():
-                line1 = ser.readline().decode(errors='ignore').strip()
-                if not line1:
-                    if (
-                        not fallback_sent
-                        and self.fallback_command
-                        and time.monotonic() >= passive_deadline
-                    ):
+                read_timeout = self.timeout_sec if fallback_sent else min(max(0.8, self.timeout_sec * 0.1), 1.5)
+                try:
+                    frame = read_protocol_measurement_frame_from_serial(
+                        ser,
+                        self.stop_event,
+                        read_timeout,
+                    )
+                except TimeoutError:
+                    if not fallback_sent and self.fallback_command:
                         write_ascii_command(ser, self.fallback_command)
                         fallback_sent = True
                         self.out_queue.put(('log', f'Fallback command sent: {self.fallback_command.strip()}'))
-                    continue
-
-                if not NAME_PATTERNS['omega'].match(line1):
-                    if (
-                        not fallback_sent
-                        and self.fallback_command
-                        and time.monotonic() >= passive_deadline
-                    ):
-                        write_ascii_command(ser, self.fallback_command)
-                        fallback_sent = True
-                        self.out_queue.put(('log', f'Fallback command sent after non-frame traffic: {self.fallback_command.strip()}'))
-                    continue
-
-                line2 = ser.readline().decode(errors='ignore').strip()
-                line3 = ser.readline().decode(errors='ignore').strip()
-
-                if not NAME_PATTERNS['magnitude'].match(line2) or not NAME_PATTERNS['phase'].match(line3):
-                    self.out_queue.put(('log', f'格式不匹配，已跳过本次帧'))
-                    continue
-
-                try:
-                    omega = parse_array_from_line(line1)
-                    mag = parse_array_from_line(line2)
-                    phase = parse_array_from_line(line3)
-                    diagnostics = read_optional_diagnostics_from_serial(ser)
-                    if diagnostics:
-                        self.out_queue.put(('log', f'已读取测量诊断数组: {", ".join(sorted(diagnostics.keys()))}'))
-                    self.out_queue.put(('frame', (omega, mag, phase, diagnostics)))
-                    if self.continuous and not self.command:
-                        fallback_sent = False
-                        passive_deadline = time.monotonic() + max(0.8, self.timeout_sec * 2.5)
+                        continue
                     if not self.continuous:
-                        break
-                except Exception as e:
-                    self.out_queue.put(('log', f'解析失败: {e}'))
+                        raise
+                    continue
+
+                if frame.diagnostics:
+                    self.out_queue.put(('log', f'已读取测量诊断数组: {", ".join(sorted(frame.diagnostics.keys()))}'))
+                self.out_queue.put(('frame', frame.as_legacy_tuple()))
+                if self.continuous and not self.command:
+                    fallback_sent = False
+                if not self.continuous:
+                    break
 
         except Exception as e:
             self.out_queue.put(('error', str(e)))
@@ -2857,17 +3229,27 @@ class AutoSweepReader(threading.Thread):
             )
 
             frames = []
-            coarse_command = self._command_from_segment(AUTO_COARSE_SWEEP)
-            self.out_queue.put(('log', f'自动识别粗扫: {coarse_command.strip()}'))
-            write_ascii_command(ser, coarse_command)
-            coarse_frame = read_measurement_frame_from_serial(ser, self.stop_event, self.timeout_sec)
-            frames.append(coarse_frame)
+            expected_target = EXPECTED_CIRCUIT_MAP.get(self.expected_circuit)
+            demo_segments = demo_segments_for_expected(self.expected_circuit)
+            if demo_segments is not None and expected_target is not None:
+                candidate_type = expected_target[0]
+                segments = demo_segments
+                sent = set()
+                self.out_queue.put((
+                    'log',
+                    f'按期望电路“{self.expected_circuit}”使用演示扫频预设，共 {len(segments)} 段。'
+                ))
+            else:
+                coarse_command = self._command_from_segment(AUTO_COARSE_SWEEP)
+                self.out_queue.put(('log', f'自动识别粗扫: {coarse_command.strip()}'))
+                write_ascii_command(ser, coarse_command)
+                coarse_frame = read_measurement_frame_from_serial(ser, self.stop_event, self.timeout_sec)
+                frames.append(coarse_frame)
 
-            candidate_type = self._candidate_type_from_coarse(coarse_frame)
-            segments = AUTO_SWEEP_SEGMENTS.get(candidate_type, AUTO_SWEEP_SEGMENTS['other'])
-            self.out_queue.put(('log', f'粗扫候选类型: {FILTER_TYPE_LABELS.get(candidate_type, candidate_type)}；开始补扫 {len(segments)} 段。'))
-
-            sent = {coarse_command.strip()}
+                candidate_type = self._candidate_type_from_coarse(coarse_frame)
+                segments = AUTO_SWEEP_SEGMENTS.get(candidate_type, AUTO_SWEEP_SEGMENTS['other'])
+                self.out_queue.put(('log', f'粗扫候选类型: {FILTER_TYPE_LABELS.get(candidate_type, candidate_type)}；开始补扫 {len(segments)} 段。'))
+                sent = {coarse_command.strip()}
             for segment in segments:
                 if self.stop_event.is_set():
                     break
@@ -2880,7 +3262,10 @@ class AutoSweepReader(threading.Thread):
                 frames.append(read_measurement_frame_from_serial(ser, self.stop_event, self.timeout_sec))
 
             omega, mag, phase, diagnostics = merge_measurement_frames(frames)
-            source = f'自动识别({FILTER_TYPE_LABELS.get(candidate_type, candidate_type)}补扫)'
+            if demo_segments is not None:
+                source = f'演示预设({self.expected_circuit})'
+            else:
+                source = f'自动识别({FILTER_TYPE_LABELS.get(candidate_type, candidate_type)}补扫)'
             self.out_queue.put(('auto_frame', (omega, mag, phase, diagnostics, source, self.expected_circuit)))
         except Exception as exc:
             self.out_queue.put(('error', f'自动识别失败: {exc}'))
@@ -2904,207 +3289,255 @@ def read_measurement_frame_from_serial(ser, stop_event, timeout_sec: float):
 
 
 def matlab_app_append_report_v2(self, r: SystemAnalysisResult):
-    gm_text = '\u65e0\u6cd5\u8ba1\u7b97' if r.gain_margin_db is None else f'{r.gain_margin_db:.2f} dB'
-    pm_text = '\u65e0\u6cd5\u8ba1\u7b97' if r.phase_margin is None else f'{r.phase_margin:.2f} \u00b0'
-    stable_text = '\u7a33\u5b9a' if r.nyquist_stable else '\u4e0d\u7a33\u5b9a'
-    peak_label = '\u9677\u6ce2\u89d2\u9891\u7387' if r.filter_type == 'bandstop' else '\u8c10\u632f\u89d2\u9891\u7387'
-
-    lines = [
-        '=== \u7a33\u9891\u4eea\uff1a\u9891\u54cd\u4e0e\u5948\u594e\u65af\u7279\u7a33\u5b9a\u6027\u5206\u6790\u62a5\u544a ===',
-        f'\u7cfb\u7edf\u7c7b\u578b: {r.system_order}',
-        f'\u6ee4\u6ce2\u5668\u65cf: {FILTER_TYPE_LABELS.get(r.filter_type, FILTER_TYPE_LABELS["other"])}',
-        f'\u4f30\u8ba1\u9636\u6b21: {r.order_estimate}',
-        f'\u5224\u9636\u53ef\u9760\u6027: {r.identification_summary}\uff08\u7f6e\u4fe1\u5ea6 {r.identification_confidence:.2f}\uff09',
-        f'期望电路: {getattr(r, "expected_circuit", "Auto")}',
-        f'期望匹配: {getattr(r, "expected_match_text", "未指定期望电路，按自动识别结果验收。")}',
-        f'\u6570\u636e\u70b9\u6570: {len(r.omega)}',
-        f'\u622a\u6b62/\u7279\u5f81\u5224\u636e: {r.cutoff_method}',
-    ]
-
-    lines.append('--- 识别证据 ---')
-    lines.extend(build_identification_evidence(r))
-    diagnostic_notes = [
-        note for note in r.notes
-        if any(key in note for key in ('测量质量', '峰峰值', '重复采集', '采样信息', '削顶', '偏置', 'RMS'))
-    ]
-    if diagnostic_notes:
-        lines.append('--- 测量质量诊断 ---')
-        lines.extend(diagnostic_notes[:8])
-
-    if r.filter_type in ('lowpass', 'highpass'):
-        lines.extend([
-            f'-3 dB \u622a\u6b62\u89d2\u9891\u7387 = {r.magnitude_cutoff_omega:.2f} rad/s',
-            f'\u76f8\u4f4d -45\u00b0 \u89d2\u9891\u7387 = {"\u65e0\u6cd5\u8ba1\u7b97" if r.phase_cutoff_omega is None else f"{r.phase_cutoff_omega:.2f} rad/s"}',
-        ])
-    elif r.filter_type == 'bandpass':
-        lines.extend([
-            f'\u5de6\u4fa7 -3 dB \u89d2\u9891\u7387 = {r.magnitude_cutoff_omega:.2f} rad/s',
-            f'\u53f3\u4fa7 -3 dB \u89d2\u9891\u7387 = {"\u65e0\u6cd5\u8ba1\u7b97" if r.secondary_cutoff_omega is None else f"{r.secondary_cutoff_omega:.2f} rad/s"}',
-            f'\u4e2d\u5fc3\u89d2\u9891\u7387 \u03c90 = {r.omega_c:.2f} rad/s',
-            f'\u5e26\u5bbd = {"\u65e0\u6cd5\u8ba1\u7b97" if r.bandwidth_omega is None else f"{r.bandwidth_omega:.2f} rad/s"}',
-        ])
-    elif r.filter_type == 'bandstop':
-        lines.extend([
-            f'\u5de6\u4fa7 -3 dB \u89d2\u9891\u7387 = {r.magnitude_cutoff_omega:.2f} rad/s',
-            f'\u53f3\u4fa7 -3 dB \u89d2\u9891\u7387 = {"\u65e0\u6cd5\u8ba1\u7b97" if r.secondary_cutoff_omega is None else f"{r.secondary_cutoff_omega:.2f} rad/s"}',
-            f'\u9677\u6ce2\u89d2\u9891\u7387 \u03c90 = {r.omega_c:.2f} rad/s',
-            f'\u963b\u5e26\u5bbd\u5ea6 = {"\u65e0\u6cd5\u8ba1\u7b97" if r.bandwidth_omega is None else f"{r.bandwidth_omega:.2f} rad/s"}',
-        ])
-    else:
-        lines.append(f'\u4e3b\u7279\u5f81\u89d2\u9891\u7387 = {r.omega_c:.2f} rad/s')
-
-    lines.extend([
-        f'\u7279\u5f81\u9891\u70b9\u76f8\u4f4d = {r.cutoff_phase_deg:.2f} \u00b0',
-        f'\u5e45\u9891\u9608\u503c = {r.cutoff_mag_db:.2f} dB',
-        f'\u6700\u5927\u5e45\u503c = {r.max_magnitude:.4f} ({20*np.log10(max(r.max_magnitude, 1e-12)):.2f} dB)',
-        f'{peak_label} \u2248 {r.resonant_frequency:.2f} rad/s',
-        f'\u5230 (-1,0) \u6700\u5c0f\u8ddd\u79bb = {r.min_distance:.4f}',
-        f'Nyquist \u7a7f\u8d8a\u70b9\u6570\uff08\u8fd1\u4f3c\uff09: {len(r.crossing_points)}',
-        f'Nyquist \u9006\u65f6\u9488\u5305\u56f4\u6570: {r.nyquist_winding_ccw}',
-        f'Nyquist \u987a\u65f6\u9488\u5305\u56f4\u6570 N: {r.nyquist_encirclements_cw}',
-        f'\u5f00\u73af\u53f3\u534a\u5e73\u9762\u6781\u70b9\u6570 P: {r.assumed_open_loop_rhp_poles}',
-        f'\u95ed\u73af\u53f3\u534a\u5e73\u9762\u6781\u70b9\u6570 Z = P + N: {r.estimated_closed_loop_rhp_poles}',
-        f'\u5948\u594e\u65af\u7279\u5224\u636e\u7a33\u5b9a\u6027: {stable_text}',
-        f'\u589e\u76ca\u88d5\u5ea6: {gm_text}',
-        f'\u76f8\u4f4d\u88d5\u5ea6: {pm_text}',
-        '',
-    ])
-
-    if r.filter_type == 'lowpass' and r.order_estimate == 2 and r.damping_ratio is not None:
-        lines += [
-            '--- \u4e8c\u9636\u4f4e\u901a\u7279\u5f81\u53c2\u6570 ---',
-            f'\u963b\u5c3c\u6bd4 \u03b6 = {r.damping_ratio:.4f}',
-            f'\u81ea\u7136\u89d2\u9891\u7387 \u03c9n = {r.natural_frequency:.2f} rad/s',
-            f'\u8d85\u8c03\u91cf = {r.overshoot_percent:.2f}%' if r.overshoot_percent is not None else '\u8d85\u8c03\u91cf = \u65e0\u6cd5\u8ba1\u7b97',
-            f'\u8c03\u8282\u65f6\u95f4(2%) \u2248 {r.settling_time_est:.3f} s' if r.settling_time_est is not None else '\u8c03\u8282\u65f6\u95f4 = \u65e0\u6cd5\u8ba1\u7b97',
-            '',
-        ]
-
-    lines.append(f'\u7a33\u5b9a\u6027\u7efc\u5408\u5224\u5b9a: {r.stability_text} (\u5f97\u5206 {r.stability_score}/6)')
-    lines.append('')
+    lines = build_filter_report_lines(r)
     self.text.insert('end', '\n'.join(lines))
     self.text.see('end')
 
 
-def matlab_app_update_plots_v2(self, r: SystemAnalysisResult):
-    self.ax_ny.clear()
-    self.ax_mag.clear()
-    self.ax_phase.clear()
-    self.ax_stab.clear()
+def matlab_app_build_ui_v2(self):
+    self.root.configure(bg='#f8fafc')
+    style = ttk.Style(self.root)
+    for style_name in ('Panel.TFrame', 'Panel.TLabelframe', 'Panel.TLabelframe.Label'):
+        try:
+            style.configure(style_name, background='#f8fafc')
+        except Exception:
+            pass
+    try:
+        style.configure('Header.TLabel', font=('微软雅黑', 13, 'bold'), foreground='#0f172a', background='#f8fafc')
+        style.configure('Value.TLabel', font=('微软雅黑', 10, 'bold'), foreground='#1d4ed8', background='#f8fafc')
+        style.configure('Accent.TButton', font=('微软雅黑', 9, 'bold'))
+    except Exception:
+        pass
 
-    extra_markers = []
-    if not np.isclose(r.magnitude_cutoff_omega, r.omega_c):
-        extra_markers.append(float(r.magnitude_cutoff_omega))
-    if r.secondary_cutoff_omega is not None and not np.isclose(r.secondary_cutoff_omega, r.omega_c):
-        extra_markers.append(float(r.secondary_cutoff_omega))
+    main = ttk.Frame(self.root, padding=(12, 10), style='Panel.TFrame')
+    main.pack(fill='both', expand=True)
+    main.columnconfigure(0, weight=1)
+    main.rowconfigure(2, weight=1)
+
+    header = ttk.Frame(main, style='Panel.TFrame')
+    header.grid(row=0, column=0, sticky='ew')
+    header.columnconfigure(1, weight=1)
+    ttk.Label(header, text='STM32G431 频响识别仪', style='Header.TLabel').grid(row=0, column=0, sticky='w')
+    self.system_type_var = tk.StringVar(value='待分析')
+    self.status_var = tk.StringVar(value='就绪')
+    ttk.Label(header, textvariable=self.system_type_var, style='Value.TLabel').grid(row=0, column=1, sticky='w', padx=(18, 0))
+    ttk.Label(header, textvariable=self.status_var, foreground='#475569').grid(row=0, column=2, sticky='e')
+
+    control = ttk.Frame(main, style='Panel.TFrame')
+    control.grid(row=1, column=0, sticky='ew', pady=(8, 10))
+    control.columnconfigure(0, weight=1)
+    control.columnconfigure(1, weight=1)
+    control.columnconfigure(2, weight=1)
+
+    conn = ttk.LabelFrame(control, text='连接与采集', padding=(10, 8))
+    sweep = ttk.LabelFrame(control, text='扫频参数', padding=(10, 8))
+    opts = ttk.LabelFrame(control, text='分析选项', padding=(10, 8))
+    conn.grid(row=0, column=0, sticky='nsew', padx=(0, 8))
+    sweep.grid(row=0, column=1, sticky='nsew', padx=4)
+    opts.grid(row=0, column=2, sticky='nsew', padx=(8, 0))
+
+    self.port_var = tk.StringVar()
+    self.port_box = ttk.Combobox(conn, textvariable=self.port_var, width=14, state='readonly')
+    ttk.Label(conn, text='串口').grid(row=0, column=0, sticky='w')
+    self.port_box.grid(row=0, column=1, sticky='ew', padx=(6, 4))
+    ttk.Button(conn, text='刷新', command=self.refresh_ports).grid(row=0, column=2, sticky='ew')
+
+    self.baud_var = tk.StringVar(value='115200')
+    self.timeout_var = tk.StringVar(value='60')
+    ttk.Label(conn, text='波特率').grid(row=1, column=0, sticky='w', pady=(8, 0))
+    ttk.Entry(conn, textvariable=self.baud_var, width=10).grid(row=1, column=1, sticky='ew', padx=(6, 4), pady=(8, 0))
+    ttk.Label(conn, text='超时').grid(row=1, column=2, sticky='w', pady=(8, 0))
+    ttk.Entry(conn, textvariable=self.timeout_var, width=6).grid(row=1, column=3, sticky='ew', padx=(4, 0), pady=(8, 0))
+
+    ttk.Button(conn, text='读取一帧', command=self.read_one_frame, style='Accent.TButton').grid(row=2, column=0, sticky='ew', pady=(10, 0))
+    ttk.Button(conn, text='连续读取', command=self.read_continuous).grid(row=2, column=1, sticky='ew', padx=4, pady=(10, 0))
+    ttk.Button(conn, text='停止', command=self.stop_reading).grid(row=2, column=2, columnspan=2, sticky='ew', pady=(10, 0))
+    conn.columnconfigure(1, weight=1)
+
+    self.f_start_var = tk.StringVar(value='100')
+    self.f_stop_var = tk.StringVar(value='20000')
+    self.f_step_var = tk.StringVar(value='100')
+    self.amp_var = tk.StringVar(value='1.2')
+    sweep_fields = [
+        ('起始 Hz', self.f_start_var, 0, 0),
+        ('终止 Hz', self.f_stop_var, 0, 2),
+        ('步进 Hz', self.f_step_var, 1, 0),
+        ('幅度 Vpp', self.amp_var, 1, 2),
+    ]
+    for label, var, row, col in sweep_fields:
+        ttk.Label(sweep, text=label).grid(row=row, column=col, sticky='w', pady=(0 if row == 0 else 8, 0))
+        ttk.Entry(sweep, textvariable=var, width=10).grid(row=row, column=col + 1, sticky='ew', padx=(6, 12), pady=(0 if row == 0 else 8, 0))
+    ttk.Button(sweep, text='发送扫频', command=self.command_sweep_once, style='Accent.TButton').grid(row=2, column=0, columnspan=2, sticky='ew', pady=(10, 0))
+    ttk.Button(sweep, text='自动识别八电路', command=self.command_auto_identify).grid(row=2, column=2, columnspan=2, sticky='ew', pady=(10, 0))
+    sweep.columnconfigure(1, weight=1)
+    sweep.columnconfigure(3, weight=1)
+
+    self.smooth_var = tk.BooleanVar(value=True)
+    self.fix_var = tk.BooleanVar(value=False)
+    self.swap_io_var = tk.BooleanVar(value=False)
+    self.window_var = tk.StringVar(value='11')
+    self.poly_var = tk.StringVar(value='3')
+    self.open_loop_p_var = tk.StringVar(value='0')
+    self.expected_circuit_var = tk.StringVar(value='Auto')
+
+    ttk.Checkbutton(opts, text='Savitzky-Golay 平滑', variable=self.smooth_var).grid(row=0, column=0, columnspan=2, sticky='w')
+    ttk.Checkbutton(opts, text='G431 首点修正', variable=self.fix_var).grid(row=1, column=0, columnspan=2, sticky='w', pady=(6, 0))
+    ttk.Checkbutton(opts, text='交换幅值方向', variable=self.swap_io_var).grid(row=2, column=0, columnspan=2, sticky='w', pady=(6, 0))
+    ttk.Label(opts, text='窗口').grid(row=0, column=2, sticky='e', padx=(12, 4))
+    ttk.Entry(opts, textvariable=self.window_var, width=6).grid(row=0, column=3, sticky='w')
+    ttk.Label(opts, text='阶数').grid(row=1, column=2, sticky='e', padx=(12, 4), pady=(6, 0))
+    ttk.Entry(opts, textvariable=self.poly_var, width=6).grid(row=1, column=3, sticky='w', pady=(6, 0))
+    ttk.Label(opts, text='P').grid(row=2, column=2, sticky='e', padx=(12, 4), pady=(6, 0))
+    ttk.Entry(opts, textvariable=self.open_loop_p_var, width=6).grid(row=2, column=3, sticky='w', pady=(6, 0))
+
+    ttk.Label(opts, text='期望电路').grid(row=3, column=0, sticky='w', pady=(10, 0))
+    self.expected_circuit_box = ttk.Combobox(
+        opts,
+        textvariable=self.expected_circuit_var,
+        values=EXPECTED_CIRCUIT_CHOICES,
+        width=12,
+        state='readonly',
+    )
+    self.expected_circuit_box.grid(row=3, column=1, sticky='ew', pady=(10, 0), padx=(6, 8))
+    ttk.Button(opts, text='导入文本测试', command=self.import_text).grid(row=4, column=0, columnspan=2, sticky='ew', pady=(10, 0))
+    ttk.Button(opts, text='保存CSV', command=self.save_csv).grid(row=4, column=2, sticky='ew', padx=(8, 4), pady=(10, 0))
+    ttk.Button(opts, text='保存图像', command=self.save_png).grid(row=4, column=3, sticky='ew', pady=(10, 0))
+    opts.columnconfigure(1, weight=1)
+
+    body = ttk.PanedWindow(main, orient='horizontal')
+    body.grid(row=2, column=0, sticky='nsew')
+
+    left = ttk.Frame(body, padding=(0, 0, 8, 0))
+    right = ttk.Frame(body, padding=(8, 0, 0, 0))
+    body.add(left, weight=5)
+    body.add(right, weight=2)
+
+    self.fig = Figure(figsize=(11.4, 7.4), dpi=100, facecolor='#f8fafc', constrained_layout=True)
+    grid = self.fig.add_gridspec(2, 2, width_ratios=[1.45, 1.0], height_ratios=[1.0, 1.0])
+    self.ax_mag = self.fig.add_subplot(grid[0, 0])
+    self.ax_phase = self.fig.add_subplot(grid[1, 0], sharex=self.ax_mag)
+    self.ax_ny = self.fig.add_subplot(grid[:, 1])
+    self.ax_stab = None
+
+    self.canvas = FigureCanvasTkAgg(self.fig, master=left)
+    self.canvas.draw()
+    self.canvas.get_tk_widget().pack(fill='both', expand=True)
+
+    tb = NavigationToolbar2Tk(self.canvas, left, pack_toolbar=False)
+    tb.update()
+    tb.pack(fill='x')
+
+    logbox = ttk.LabelFrame(right, text='分析结果 / 日志', padding=8)
+    logbox.pack(fill='both', expand=True)
+
+    self.text = tk.Text(
+        logbox,
+        wrap='word',
+        font=('Consolas', 10),
+        bg='#ffffff',
+        fg='#0f172a',
+        relief='flat',
+        padx=10,
+        pady=8,
+        spacing1=2,
+        spacing3=4,
+    )
+    self.text.pack(side='left', fill='both', expand=True)
+
+    ys = ttk.Scrollbar(logbox, orient='vertical', command=self.text.yview)
+    ys.pack(side='right', fill='y')
+    self.text.configure(yscrollcommand=ys.set)
+
+    self.text.insert('end', '稳频仪已就绪\n支持自动扫频、伯德图、滤波器类型/阶次/截止频率识别；Nyquist 图保留用于高级查看。\n\n')
+
+
+def matlab_app_update_plots_v2(self, r: SystemAnalysisResult):
+    for ax in (self.ax_mag, self.ax_phase, self.ax_ny):
+        ax.clear()
+        ax.set_facecolor('#ffffff')
+        ax.grid(True, which='major', color='#cbd5e1', alpha=0.65, linewidth=0.8)
+        ax.grid(True, which='minor', color='#e2e8f0', alpha=0.45, linewidth=0.5)
+        for spine in ax.spines.values():
+            spine.set_color('#cbd5e1')
+
+    marker_omegas: list[tuple[float, str, str]] = []
+    if r.filter_type in ('lowpass', 'highpass'):
+        marker_omegas.append((float(r.magnitude_cutoff_omega), 'ωc', '#dc2626'))
+    elif r.filter_type == 'bandpass':
+        marker_omegas.append((float(r.magnitude_cutoff_omega), 'ωL', '#f97316'))
+        if r.secondary_cutoff_omega is not None:
+            marker_omegas.append((float(r.secondary_cutoff_omega), 'ωH', '#f97316'))
+        marker_omegas.append((float(r.omega_c), 'ω0', '#dc2626'))
+    elif r.filter_type == 'bandstop':
+        marker_omegas.append((float(r.magnitude_cutoff_omega), 'ωL', '#f97316'))
+        if r.secondary_cutoff_omega is not None:
+            marker_omegas.append((float(r.secondary_cutoff_omega), 'ωH', '#f97316'))
+        marker_omegas.append((float(r.omega_c), 'ω0', '#dc2626'))
+    else:
+        marker_omegas.append((float(r.omega_c), 'ω*', '#dc2626'))
+
+    raw_mag_db = 20.0 * np.log10(np.clip(r.mag_raw, 1e-12, None))
+    phase_display = phase_array_for_display(r.phase_deg, r.filter_type)
+    cutoff_phase_display = normalize_phase_for_display(r.cutoff_phase_deg, r.filter_type)
+
+    self.ax_mag.semilogx(r.omega, raw_mag_db, '.', color='#94a3b8', ms=3.5, alpha=0.55, label='原始点')
+    self.ax_mag.semilogx(r.omega, r.mag_db, color='#2563eb', lw=2.1, label='幅值曲线')
+    self.ax_mag.axhline(r.cutoff_mag_db, linestyle=':', color='#334155', lw=1.0)
+    for omega_value, label, color in marker_omegas:
+        self.ax_mag.axvline(omega_value, linestyle='--', color=color, lw=1.1, alpha=0.9)
+        self.ax_mag.annotate(
+            label,
+            xy=(omega_value, 1.0),
+            xycoords=('data', 'axes fraction'),
+            xytext=(3, -16),
+            textcoords='offset points',
+            color=color,
+            fontsize=9,
+            ha='left',
+            va='top',
+        )
+    self.ax_mag.set_title(f'幅频响应  {r.system_order}', loc='left', fontsize=11, color='#0f172a')
+    self.ax_mag.set_ylabel('幅值 (dB)')
+    mag_legend_loc = 'lower right' if r.filter_type == 'highpass' else 'lower left'
+    self.ax_mag.legend(loc=mag_legend_loc, fontsize=8, frameon=False)
+
+    self.ax_phase.semilogx(r.omega, phase_display, color='#e11d48', lw=2.0)
+    self.ax_phase.axhline(cutoff_phase_display, linestyle=':', color='#334155', lw=1.0)
+    for omega_value, _, color in marker_omegas:
+        self.ax_phase.axvline(omega_value, linestyle='--', color=color, lw=1.1, alpha=0.9)
+    self.ax_phase.set_title('相频响应', loc='left', fontsize=11, color='#0f172a')
+    self.ax_phase.set_xlabel('角频率 ω (rad/s)')
+    self.ax_phase.set_ylabel('相位 (°)')
 
     h_positive = r.real_part + 1j * r.imag_part
     h_full = build_closed_nyquist_curve(h_positive)
+    self.ax_ny.plot(h_full.real, h_full.imag, color='#cbd5e1', linestyle='--', lw=1.0, label='镜像')
+    self.ax_ny.plot(r.real_part, r.imag_part, color='#2563eb', lw=2.0, label='H(jω)')
+    self.ax_ny.scatter(r.real_part, r.imag_part, s=14, color='#ef4444', alpha=0.62, zorder=3)
+    self.ax_ny.plot(r.real_part[0], r.imag_part[0], 'o', color='#16a34a', ms=6, label='低频')
+    self.ax_ny.plot(r.real_part[-1], r.imag_part[-1], 'x', color='#dc2626', ms=7, label='高频')
+    self.ax_ny.plot(r.real_part[r.cutoff_index], r.imag_part[r.cutoff_index], '*', color='#111827', ms=11, label='特征点')
+    self.ax_ny.plot(-1, 0, 's', color='#475569', ms=6)
+    self.ax_ny.axhline(0, color='#94a3b8', linestyle=':', lw=0.8)
+    self.ax_ny.axvline(-1, color='#94a3b8', linestyle=':', lw=0.8)
 
-    self.ax_ny.plot(h_full.real, h_full.imag, color='0.72', linestyle='--', lw=1.2, label='完整Nyquist镜像')
-    if r.filter_type == 'lowpass' and r.order_estimate == 1 and r.omega_c > 0.0:
-        low_count = max(3, min(8, len(r.mag_smooth)))
-        dc_gain = float(np.median(r.mag_smooth[:low_count]))
-        omega_ref = np.geomspace(max(float(np.min(r.omega)), 1e-12), max(float(np.max(r.omega)), 1e-12), 300)
-        h_ref = dc_gain / (1.0 + 1j * omega_ref / float(r.omega_c))
-        self.ax_ny.plot(h_ref.real, h_ref.imag, color='darkorange', linestyle=':', lw=1.8, label='一阶低通理论参考')
-
-    self.ax_ny.plot(r.real_part, r.imag_part, 'b-', lw=2, label='H(j\u03c9) 正频率')
-    self.ax_ny.scatter(r.real_part, r.imag_part, s=30, c='r', label='\u6570\u636e\u70b9')
-    self.ax_ny.plot(r.real_part[0], r.imag_part[0], 'go', ms=8, label='\u4f4e\u9891\u70b9')
-    self.ax_ny.plot(r.real_part[-1], r.imag_part[-1], 'rx', ms=8, label='\u9ad8\u9891\u70b9')
-    self.ax_ny.plot(r.real_part[r.cutoff_index], r.imag_part[r.cutoff_index], 'k*', ms=12, label=f'\u7279\u5f81\u70b9 ({r.omega_c:.2f})')
-    self.ax_ny.plot(-1, 0, 'ks', ms=8, label='\u4e34\u754c\u70b9 (-1,0)')
-    self.ax_ny.axhline(0, color='0.65', linestyle=':', lw=0.8)
-    self.ax_ny.axvline(-1, color='0.65', linestyle=':', lw=0.8)
-    self.ax_ny.grid(True, alpha=0.35)
+    ny_x = np.concatenate([np.asarray(h_full.real, dtype=float), np.asarray([-1.0])])
+    ny_y = np.concatenate([np.asarray(h_full.imag, dtype=float), np.asarray([0.0])])
+    x_mid = float((np.max(ny_x) + np.min(ny_x)) / 2.0)
+    y_mid = float((np.max(ny_y) + np.min(ny_y)) / 2.0)
+    span = max(float(np.max(ny_x) - np.min(ny_x)), float(np.max(ny_y) - np.min(ny_y)), 0.25) * 0.62
+    self.ax_ny.set_xlim(x_mid - span, x_mid + span)
+    self.ax_ny.set_ylim(y_mid - span, y_mid + span)
     self.ax_ny.set_aspect('equal', adjustable='box')
+    self.ax_ny.set_title('Nyquist 图', loc='left', fontsize=11, color='#0f172a')
+    self.ax_ny.set_xlabel('实部 Re{H(jω)}')
+    self.ax_ny.set_ylabel('虚部 Im{H(jω)}')
+    self.ax_ny.legend(loc='upper right', fontsize=8, frameon=False)
 
-    max_abs = max(float(np.max(np.abs(h_full.real))), float(np.max(np.abs(h_full.imag))), 1.0) * 1.1
-    self.ax_ny.set_xlim([-max_abs, max_abs])
-    self.ax_ny.set_ylim([-max_abs, max_abs])
-    self.ax_ny.set_title('\u5948\u594e\u65af\u7279\u56fe H(j\u03c9)')
-    self.ax_ny.set_xlabel('\u5b9e\u90e8 Re{H(j\u03c9)}')
-    self.ax_ny.set_ylabel('\u865a\u90e8 Im{H(j\u03c9)}')
-    self.ax_ny.legend(loc='best', fontsize=8)
-
-    self.ax_mag.semilogx(r.omega, r.mag_db, 'b-')
-    self.ax_mag.axvline(r.omega_c, linestyle='--', color='red', lw=1.2)
-    for marker in extra_markers:
-        self.ax_mag.axvline(marker, linestyle=':', color='darkorange', lw=1.0)
-    self.ax_mag.axhline(r.cutoff_mag_db, linestyle=':', color='black', lw=1.0)
-    self.ax_mag.grid(True, which='both', alpha=0.35)
-    self.ax_mag.set_title('\u5e45\u9891\u54cd\u5e94\u66f2\u7ebf |H(j\u03c9)|(dB)')
-    self.ax_mag.set_ylabel('\u5e45\u503c (dB)')
-
-    self.ax_phase.semilogx(r.omega, r.phase_deg, 'r-')
-    self.ax_phase.axvline(r.omega_c, linestyle='--', color='red', lw=1.2)
-    for marker in extra_markers:
-        self.ax_phase.axvline(marker, linestyle=':', color='darkorange', lw=1.0)
-    self.ax_phase.axhline(r.cutoff_phase_deg, linestyle=':', color='blue', lw=1.0)
-    self.ax_phase.grid(True, which='both', alpha=0.35)
-    self.ax_phase.set_title('\u76f8\u9891\u54cd\u5e94\u66f2\u7ebf \u03c6(\u03c9)')
-    self.ax_phase.set_xlabel('\u89d2\u9891\u7387 \u03c9 (rad/s)')
-    self.ax_phase.set_ylabel('\u76f8\u4f4d \u03c6 (\u00b0)')
-
-    self.ax_stab.plot(h_full.real, h_full.imag, color='0.72', linestyle='--', lw=1.2, label='完整Nyquist镜像')
-    self.ax_stab.plot(r.real_part, r.imag_part, 'b-', lw=2, label='H(j\u03c9)正频率')
-    self.ax_stab.scatter(r.real_part, r.imag_part, s=30, c='r', label='\u6570\u636e\u70b9')
-    self.ax_stab.plot(-1, 0, 'ks', ms=8, label='\u4e34\u754c\u70b9 (-1,j0)')
-    self.ax_stab.axhline(0, color='0.65', linestyle=':', lw=0.8)
-    self.ax_stab.axvline(-1, color='0.65', linestyle=':', lw=0.8)
-
-    closest_idx = int(np.argmin(np.sqrt((r.real_part + 1.0) ** 2 + r.imag_part ** 2)))
-    self.ax_stab.plot(
-        r.real_part[closest_idx], r.imag_part[closest_idx], 'mo', ms=8,
-        label=f'\u6700\u8fd1\u70b9(\u8ddd\u79bb={r.min_distance:.3f})'
-    )
-
-    if len(r.crossing_points) > 0:
-        for i, (a, _) in enumerate(r.crossing_points):
-            self.ax_stab.plot(r.real_part[a], r.imag_part[a], 'g^', ms=8, label='\u53ef\u80fd\u7a7f\u8d8a\u70b9' if i == 0 else None)
-
-    max_abs2 = max(float(np.max(np.abs(h_full.real))), float(np.max(np.abs(h_full.imag))), 1.0) * 1.2
-    self.ax_stab.set_xlim([-max_abs2, max_abs2])
-    self.ax_stab.set_ylim([-max_abs2, max_abs2])
-    self.ax_stab.grid(True, alpha=0.35)
-    self.ax_stab.set_aspect('equal', adjustable='box')
-    self.ax_stab.set_title('\u7a33\u5b9a\u6027\u5206\u6790\u5948\u594e\u65af\u7279\u56fe')
-    self.ax_stab.set_xlabel('\u5b9e\u90e8 Re{H(j\u03c9)}')
-    self.ax_stab.set_ylabel('\u865a\u90e8 Im{H(j\u03c9)}')
-    self.ax_stab.legend(loc='best', fontsize=8)
-
-    color = 'green' if r.stability_score >= 5 else 'orange' if r.stability_score >= 3 else 'red'
-    self.ax_stab.text(
-        0.02, 0.98, r.stability_text,
-        transform=self.ax_stab.transAxes,
-        va='top', ha='left',
-        color=color,
-        bbox=dict(facecolor='white', alpha=0.85, edgecolor='0.8')
-    )
-    self.ax_stab.text(
-        0.02, 0.88,
-        f'\u9636\u6b21={r.order_estimate}\uff08{r.identification_summary}\uff09\uff0cN={r.nyquist_encirclements_cw}\uff0cP={r.assumed_open_loop_rhp_poles}\uff0cZ=P+N={r.estimated_closed_loop_rhp_poles}',
-        transform=self.ax_stab.transAxes,
-        va='top', ha='left',
-        color='black',
-        fontsize=9,
-        bbox=dict(facecolor='white', alpha=0.7)
-    )
-    self.ax_stab.text(
-        0.02, 0.78,
-        FILTER_TYPE_LABELS.get(r.filter_type, FILTER_TYPE_LABELS['other']),
-        transform=self.ax_stab.transAxes,
-        va='top', ha='left',
-        color='blue',
-        fontsize=9,
-        bbox=dict(facecolor='white', alpha=0.7)
-    )
-
-    self.fig.tight_layout()
     self.canvas.draw_idle()
 
 
+MatlabExactApp._build_ui = matlab_app_build_ui_v2
 MatlabExactApp.append_report = matlab_app_append_report_v2
 MatlabExactApp.update_plots = matlab_app_update_plots_v2
 

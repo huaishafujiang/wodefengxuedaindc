@@ -48,9 +48,10 @@
 /* USER CODE BEGIN PD */
 #define adc_buffer_size 256
 #define dac_buffer_size 1024
-#define MAX_FREQ_STEPS 400
+#define MAX_FREQ_STEPS 200
 #define TIM1_ADC_PRESCALER 0U
 #define TIM1_COUNTER_CLK_HZ 170000000.0f
+#define TIM1_MAX_AUTORELOAD 0xFFFFU
 #define TIM2_DAC_PRESCALER 0U
 #define TIM2_COUNTER_CLK_HZ 170000000.0f
 #define ADC_COHERENT_CYCLES 16U
@@ -60,9 +61,9 @@
 #define ADC_CAPTURE_GUARD_MS 20U
 #define UART_CMD_BUFFER_SIZE 96U
 #define SWEEP_DEFAULT_F_START 100.0f
-#define SWEEP_DEFAULT_F_STOP 10000.0f
+#define SWEEP_DEFAULT_F_STOP 20000.0f
 #define SWEEP_DEFAULT_F_STEP 100.0f
-#define SWEEP_DEFAULT_AMPLITUDE_VPP 1.0f
+#define SWEEP_DEFAULT_AMPLITUDE_VPP 1.2f
 #define SWEEP_MAX_AMPLITUDE_VPP 3.0f
 
 /* USER CODE END PD */
@@ -120,7 +121,12 @@ typedef struct {
     float32_t adc2_dc_v;
     float32_t adc1_pp_v;
     float32_t adc2_pp_v;
+    uint16_t adc1_min_code;
+    uint16_t adc1_max_code;
+    uint16_t adc2_min_code;
+    uint16_t adc2_max_code;
     uint16_t clip_flags;
+    uint32_t adc_timer_prescaler;
 } StepSweepData_t;
 
 typedef struct {
@@ -130,10 +136,6 @@ typedef struct {
 
 float32_t fft_input1[adc_buffer_size*2];
 float32_t fft_input2[adc_buffer_size*2];
-float32_t mag_out1[adc_buffer_size];
-float32_t mag_out2[adc_buffer_size];
-float32_t hanning_window_coeff[adc_buffer_size]; // 新增：Hanning 窗系数数组
-
 struct PhaseData {
     float32_t phase_unwrapped;  // 解缠绕后的相位差
     float32_t last_phase_raw;   // 上一次原始相位差（未解缠绕）
@@ -158,25 +160,17 @@ struct PhaseData data_phase = {
     .first_point = 1
 };
 
-float32_t phase_rad[MAX_FREQ_STEPS];
-float32_t Gain[MAX_FREQ_STEPS];
-uint32_t ActualFreqHz[MAX_FREQ_STEPS];
-uint32_t AdcSampleRateHz[MAX_FREQ_STEPS];
-uint32_t DacSampleRateHz[MAX_FREQ_STEPS];
+uint16_t GainQ15[MAX_FREQ_STEPS];
+int16_t PhaseMilliRad[MAX_FREQ_STEPS];
+uint32_t OmegaMilliRadPerSec[MAX_FREQ_STEPS];
 uint16_t InputRmsMv[MAX_FREQ_STEPS];
 uint16_t OutputRmsMv[MAX_FREQ_STEPS];
 uint16_t InputDcMv[MAX_FREQ_STEPS];
 uint16_t OutputDcMv[MAX_FREQ_STEPS];
-uint16_t MagnitudeRepeatSpanCentiDb[MAX_FREQ_STEPS];
-uint16_t PhaseRepeatSpanMilliRad[MAX_FREQ_STEPS];
 uint16_t InputPpMv[MAX_FREQ_STEPS];
 uint16_t OutputPpMv[MAX_FREQ_STEPS];
 uint16_t ClipFlags[MAX_FREQ_STEPS];
 uint16_t ValidCaptureCount[MAX_FREQ_STEPS];
-
-//uint16_t adc_buffer1[adc_buffer_size],adc_buffer2[adc_buffer_size];
-
-
 
 /* USER CODE END PV */
 
@@ -227,7 +221,60 @@ static void StepSweep_ResetRuntimeData(StepSweepData_t *state, const StepSweepCo
 	state->adc2_dc_v = 0.0f;
 	state->adc1_pp_v = 0.0f;
 	state->adc2_pp_v = 0.0f;
+	state->adc1_min_code = 0U;
+	state->adc1_max_code = 0U;
+	state->adc2_min_code = 0U;
+	state->adc2_max_code = 0U;
 	state->clip_flags = 0U;
+	state->adc_timer_prescaler = TIM1_ADC_PRESCALER;
+}
+
+static void StepSweep_ConfigureAdcTimer(StepSweepData_t *state, float32_t target_sample_rate)
+{
+	if (target_sample_rate < 1.0f) {
+		target_sample_rate = 1.0f;
+	}
+
+	float32_t min_divider =
+		TIM1_COUNTER_CLK_HZ / (target_sample_rate * ((float32_t)TIM1_MAX_AUTORELOAD + 1.0f));
+	uint32_t prescaler = 0U;
+	if (min_divider > 1.0f) {
+		prescaler = (uint32_t)ceilf(min_divider) - 1U;
+	}
+	if (prescaler > TIM1_MAX_AUTORELOAD) {
+		prescaler = TIM1_MAX_AUTORELOAD;
+	}
+
+	float32_t counter_clk = TIM1_COUNTER_CLK_HZ / ((float32_t)prescaler + 1.0f);
+	uint32_t arr_candidate = (uint32_t)roundf((counter_clk / target_sample_rate) - 1.0f);
+	while (arr_candidate > TIM1_MAX_AUTORELOAD && prescaler < TIM1_MAX_AUTORELOAD) {
+		prescaler++;
+		counter_clk = TIM1_COUNTER_CLK_HZ / ((float32_t)prescaler + 1.0f);
+		arr_candidate = (uint32_t)roundf((counter_clk / target_sample_rate) - 1.0f);
+	}
+
+	if (arr_candidate < 1U) {
+		arr_candidate = 1U;
+	}
+	if (arr_candidate > TIM1_MAX_AUTORELOAD) {
+		arr_candidate = TIM1_MAX_AUTORELOAD;
+	}
+
+	state->adc_timer_prescaler = prescaler;
+	state->new_arr_value = (uint16_t)arr_candidate;
+	state->adc_actual_sample_rate =
+		TIM1_COUNTER_CLK_HZ / (((float32_t)prescaler + 1.0f) * ((float32_t)state->new_arr_value + 1.0f));
+}
+
+static bool StepSweep_WaitForAdcCapture(uint32_t timeout_ms)
+{
+	uint32_t start_tick = HAL_GetTick();
+	while (!adc_flag) {
+		if ((HAL_GetTick() - start_tick) >= timeout_ms) {
+			return false;
+		}
+	}
+	return true;
 }
 
 static bool StepSweep_ValidateConfig(const StepSweepConfig_t *cfg)
@@ -332,6 +379,7 @@ static void UART_PrintHelp(void)
 	printf("  SWEEP <start_hz> <stop_hz> <step_hz> <amplitude_vpp>\r\n");
 	printf("  DEFAULT\r\n");
 	printf("  PING\r\n");
+	printf("Tip: bias AC-coupled HP/BP nodes to about 1.65V before ADC/LM358.\r\n");
 }
 
 static bool SweepProtocol_ParseCommand(char *line, SweepCommand_t *command)
@@ -535,6 +583,10 @@ void wave_analys(StepSweepData_t* data){
 	data->adc2_rms_v = sqrtf(sumsq2 / (float32_t)adc_buffer_size);
 	data->adc1_pp_v = ((float32_t)max1 - (float32_t)min1) * 3.3f / 4095.0f;
 	data->adc2_pp_v = ((float32_t)max2 - (float32_t)min2) * 3.3f / 4095.0f;
+	data->adc1_min_code = min1;
+	data->adc1_max_code = max1;
+	data->adc2_min_code = min2;
+	data->adc2_max_code = max2;
 	data->clip_flags = 0U;
 	if (min1 <= 4U || max1 >= 4091U) {
 		data->clip_flags |= 0x01U;
@@ -606,50 +658,6 @@ static float32_t MedianFloat32(float32_t *values, uint32_t count)
 	return 0.5f * (values[(count / 2U) - 1U] + values[count / 2U]);
 }
 
-static float32_t SpanFloat32(const float32_t *values, uint32_t count)
-{
-	if (count == 0U) {
-		return 0.0f;
-	}
-
-	float32_t min_value = values[0];
-	float32_t max_value = values[0];
-	for (uint32_t i = 1U; i < count; i++) {
-		if (values[i] < min_value) {
-			min_value = values[i];
-		}
-		if (values[i] > max_value) {
-			max_value = values[i];
-		}
-	}
-
-	return max_value - min_value;
-}
-
-static float32_t MagnitudeSpanDb(const float32_t *values, uint32_t count)
-{
-	if (count == 0U) {
-		return 0.0f;
-	}
-
-	float32_t min_value = 1.0e30f;
-	float32_t max_value = 0.0f;
-	for (uint32_t i = 0U; i < count; i++) {
-		if (values[i] > 1.0e-12f && values[i] < min_value) {
-			min_value = values[i];
-		}
-		if (values[i] > max_value) {
-			max_value = values[i];
-		}
-	}
-
-	if (max_value <= 1.0e-12f || min_value >= 1.0e29f) {
-		return 0.0f;
-	}
-
-	return 20.0f * log10f(max_value / min_value);
-}
-
 static uint16_t FloatToScaledU16(float32_t value, float32_t scale)
 {
 	if (value <= 0.0f) {
@@ -662,12 +670,107 @@ static uint16_t FloatToScaledU16(float32_t value, float32_t scale)
 	return (uint16_t)roundf(scaled);
 }
 
-static uint32_t FloatToHzU32(float32_t value)
+static uint16_t FloatToQ15(float32_t value)
+{
+	if (value <= 0.0f) {
+		return 0U;
+	}
+	if (value >= 1.9999f) {
+		return 65535U;
+	}
+	return (uint16_t)roundf(value * 32768.0f);
+}
+
+static int16_t FloatRadToMilliI16(float32_t value)
+{
+	float32_t scaled = value * 1000.0f;
+	if (scaled > 32767.0f) {
+		return 32767;
+	}
+	if (scaled < -32768.0f) {
+		return -32768;
+	}
+	return (int16_t)roundf(scaled);
+}
+
+static uint32_t FloatToScaledU32(float32_t value, float32_t scale)
 {
 	if (value <= 0.0f) {
 		return 0UL;
 	}
-	return (uint32_t)roundf(value);
+	return (uint32_t)roundf(value * scale);
+}
+
+static void UART_PrintScaledU16Array(const char *name, const uint16_t *values, uint16_t count, float32_t divisor)
+{
+	printf("%s=[", name);
+	for (uint16_t i = 0; i < count; i++) {
+		if (i > 0U) {
+			printf(",");
+		}
+		printf("%f", ((float32_t)values[i]) / divisor);
+	}
+	printf("]\r\n");
+}
+
+static void UART_PrintQ15Array(const char *name, const uint16_t *values, uint16_t count)
+{
+	printf("%s=[", name);
+	for (uint16_t i = 0; i < count; i++) {
+		if (i > 0U) {
+			printf(",");
+		}
+		printf("%f", ((float32_t)values[i]) / 32768.0f);
+	}
+	printf("]\r\n");
+}
+
+static void UART_PrintMilliRadArray(const char *name, const int16_t *values, uint16_t count)
+{
+	printf("%s=[", name);
+	for (uint16_t i = 0; i < count; i++) {
+		if (i > 0U) {
+			printf(",");
+		}
+		printf("%f", ((float32_t)values[i]) / 1000.0f);
+	}
+	printf("]\r\n");
+}
+
+static void UART_PrintU16Array(const char *name, const uint16_t *values, uint16_t count)
+{
+	printf("%s=[", name);
+	for (uint16_t i = 0; i < count; i++) {
+		if (i > 0U) {
+			printf(",");
+		}
+		printf("%u", (unsigned int)values[i]);
+	}
+	printf("]\r\n");
+}
+
+static void UART_PrintU32Array(const char *name, const uint32_t *values, uint16_t count)
+{
+	printf("%s=[", name);
+	for (uint16_t i = 0; i < count; i++) {
+		if (i > 0U) {
+			printf(",");
+		}
+		printf("%lu", (unsigned long)values[i]);
+	}
+	printf("]\r\n");
+}
+
+static void UART_PrintScaledU32Array(const char *name, const uint32_t *values, uint16_t count, float32_t divisor)
+{
+	printf("%s=[", name);
+	for (uint16_t i = 0; i < count; i++) {
+		if (i > 0U) {
+			printf(",");
+		}
+		printf("%f", ((float32_t)values[i]) / divisor);
+	}
+	printf("]\r\n");
 }
 
 /**
@@ -723,9 +826,6 @@ arm_status StepSweep_Generate_Data(float32_t frequency,
         // 边界检查和四舍五入
         stepsweep_data->dac_buffer[i] = (uint16_t)fmaxf(0.0f, fminf(config->DAC_MAX_VAL, roundf(temp_float[i])));
     }
-		
-//		for(int j=0;j<N_actual;j++)
-//			printf("%d\r\n",stepsweep_data->dac_buffer[j]);
     
     return ARM_MATH_SUCCESS;
 }
@@ -760,8 +860,13 @@ void Sweep_ExecuteStepSweep(
 	config->num_log_steps = (uint16_t)computed_steps;
 	uint16_t steps = config->num_log_steps;
 	data->total_steps = steps;
+	uint16_t input_min_code_all = 0xFFFFU;
+	uint16_t input_max_code_all = 0U;
+	uint16_t output_min_code_all = 0xFFFFU;
+	uint16_t output_max_code_all = 0U;
+	uint16_t input_clip_points = 0U;
+	uint16_t output_clip_points = 0U;
 
-	printf("omega=[");
 	for (uint16_t i = 0; i < steps; i++) {
 		float32_t M_target_f = (f_target * N_max) / f_dac;
 		uint32_t M = (uint32_t)floorf(M_target_f);
@@ -797,21 +902,11 @@ void Sweep_ExecuteStepSweep(
 		data->dac_actual_sample_rate = TIM2_COUNTER_CLK_HZ / ((float32_t)data->dac_timer_arr + 1.0f);
 		data->actual_freq = data->dac_actual_sample_rate * (float32_t)M / (float32_t)N_actual;
 		data->current_freq = data->actual_freq;
-
-		if (i < steps - 1U) {
-			printf("%f,", data->current_freq * 2.0f * PI);
-		} else {
-			printf("%f]\r\n", data->current_freq * 2.0f * PI);
-		}
+		OmegaMilliRadPerSec[i] = FloatToScaledU32(data->current_freq * 2.0f * PI, 1000.0f);
 
 		if (StepSweep_Generate_Data(data->current_freq, config, data) != ARM_MATH_SUCCESS) {
-			Gain[i] = 0.0f;
-			phase_rad[i] = 0.0f;
-			ActualFreqHz[i] = FloatToHzU32(data->current_freq);
-			AdcSampleRateHz[i] = 0UL;
-			DacSampleRateHz[i] = FloatToHzU32(data->dac_actual_sample_rate);
-			MagnitudeRepeatSpanCentiDb[i] = 0U;
-			PhaseRepeatSpanMilliRad[i] = 0U;
+			GainQ15[i] = 0U;
+			PhaseMilliRad[i] = 0;
 			InputRmsMv[i] = 0U;
 			OutputRmsMv[i] = 0U;
 			InputDcMv[i] = 0U;
@@ -825,24 +920,13 @@ void Sweep_ExecuteStepSweep(
 		}
 
 		float32_t adc_target_fs = data->current_freq * ADC_SAMPLES_PER_SIGNAL_PERIOD;
-		if (adc_target_fs < 1.0f) {
-			adc_target_fs = 1.0f;
-		}
-		uint32_t arr_candidate = (uint32_t)roundf((TIM1_COUNTER_CLK_HZ / adc_target_fs) - 1.0f);
-		if (arr_candidate < 1U) {
-			arr_candidate = 1U;
-		}
-		if (arr_candidate > 0xFFFFU) {
-			arr_candidate = 0xFFFFU;
-		}
-		data->new_arr_value = (uint16_t)arr_candidate;
-		data->adc_actual_sample_rate = TIM1_COUNTER_CLK_HZ / ((float32_t)data->new_arr_value + 1.0f);
+		StepSweep_ConfigureAdcTimer(data, adc_target_fs);
 
 		HAL_DAC_Stop_DMA(&hdac1, DAC_CHANNEL_1);
 		HAL_TIM_Base_Stop(&htim1);
 		HAL_TIM_Base_Stop(&htim2);
 
-		__HAL_TIM_SET_PRESCALER(&htim1, TIM1_ADC_PRESCALER);
+		__HAL_TIM_SET_PRESCALER(&htim1, data->adc_timer_prescaler);
 		__HAL_TIM_SET_AUTORELOAD(&htim1, data->new_arr_value);
 		__HAL_TIM_SET_PRESCALER(&htim2, TIM2_DAC_PRESCALER);
 		__HAL_TIM_SET_AUTORELOAD(&htim2, data->dac_timer_arr);
@@ -863,50 +947,74 @@ void Sweep_ExecuteStepSweep(
 		HAL_Delay(settle_time_ms);
 
 		float32_t gain_samples[SWEEP_CAPTURE_REPEATS];
-		float32_t phase_samples[SWEEP_CAPTURE_REPEATS];
 		float32_t input_rms_samples[SWEEP_CAPTURE_REPEATS];
 		float32_t output_rms_samples[SWEEP_CAPTURE_REPEATS];
 		float32_t input_dc_samples[SWEEP_CAPTURE_REPEATS];
 		float32_t output_dc_samples[SWEEP_CAPTURE_REPEATS];
 		float32_t input_pp_samples[SWEEP_CAPTURE_REPEATS];
 		float32_t output_pp_samples[SWEEP_CAPTURE_REPEATS];
+		uint16_t input_min_code = 0xFFFFU;
+		uint16_t output_min_code = 0xFFFFU;
+		uint16_t input_max_code = 0U;
+		uint16_t output_max_code = 0U;
 		uint32_t valid_captures = 0U;
 		uint16_t clip_flags_or = 0U;
 		uint32_t capture_time_ms = (uint32_t)ceilf(
 			((float32_t)config->adc_buffersize / data->adc_actual_sample_rate) * 1000.0f
 		) + ADC_CAPTURE_GUARD_MS;
+		uint32_t repeat = 0U;
+		HAL_StatusTypeDef adc1_status;
+		HAL_StatusTypeDef adc2_status;
+		bool capture_complete = false;
+		bool phase_committed = false;
 		if (capture_time_ms < 5U) {
 			capture_time_ms = 5U;
 		}
 
-		for (uint32_t repeat = 0U; repeat < SWEEP_CAPTURE_REPEATS; repeat++) {
+		for (repeat = 0U; repeat < SWEEP_CAPTURE_REPEATS; repeat++) {
 			adc1_flag = false;
 			adc2_flag = false;
 			adc_flag = false;
 
 			__HAL_TIM_SET_COUNTER(&htim1, 0);
-			HAL_StatusTypeDef adc1_status = HAL_ADC_Start_DMA(&hadc1, (uint32_t*)data->adc1_buffer, config->adc_buffersize);
-			HAL_StatusTypeDef adc2_status = HAL_ADC_Start_DMA(&hadc2, (uint32_t*)data->adc2_buffer, config->adc_buffersize);
+			adc1_status = HAL_ADC_Start_DMA(&hadc1, (uint32_t*)data->adc1_buffer, config->adc_buffersize);
+			adc2_status = HAL_ADC_Start_DMA(&hadc2, (uint32_t*)data->adc2_buffer, config->adc_buffersize);
+			capture_complete = false;
 
 			if (adc1_status == HAL_OK && adc2_status == HAL_OK) {
 				HAL_TIM_Base_Start(&htim1);
-				HAL_Delay(capture_time_ms);
+				capture_complete = StepSweep_WaitForAdcCapture(capture_time_ms);
 			}
 
 			HAL_TIM_Base_Stop(&htim1);
 			HAL_ADC_Stop_DMA(&hadc1);
 			HAL_ADC_Stop_DMA(&hadc2);
 
-			if (adc1_status == HAL_OK && adc2_status == HAL_OK) {
+			if (adc1_status == HAL_OK && adc2_status == HAL_OK && capture_complete) {
 				wave_analys(data);
 				gain_samples[valid_captures] = data->gain;
-				phase_samples[valid_captures] = data_phase.phase_unwrapped;
+				if (!phase_committed) {
+					PhaseMilliRad[i] = FloatRadToMilliI16(data_phase.phase_unwrapped);
+					phase_committed = true;
+				}
 				input_rms_samples[valid_captures] = data->adc1_rms_v;
 				output_rms_samples[valid_captures] = data->adc2_rms_v;
 				input_dc_samples[valid_captures] = data->adc1_dc_v;
 				output_dc_samples[valid_captures] = data->adc2_dc_v;
 				input_pp_samples[valid_captures] = data->adc1_pp_v;
 				output_pp_samples[valid_captures] = data->adc2_pp_v;
+				if (data->adc1_min_code < input_min_code) {
+					input_min_code = data->adc1_min_code;
+				}
+				if (data->adc1_max_code > input_max_code) {
+					input_max_code = data->adc1_max_code;
+				}
+				if (data->adc2_min_code < output_min_code) {
+					output_min_code = data->adc2_min_code;
+				}
+				if (data->adc2_max_code > output_max_code) {
+					output_max_code = data->adc2_max_code;
+				}
 				clip_flags_or |= data->clip_flags;
 				valid_captures++;
 			}
@@ -920,174 +1028,69 @@ void Sweep_ExecuteStepSweep(
 		HAL_TIM_Base_Stop(&htim2);
 		HAL_DAC_Stop_DMA(&hdac1, DAC_CHANNEL_1);
 
-		ActualFreqHz[i] = FloatToHzU32(data->current_freq);
-		AdcSampleRateHz[i] = FloatToHzU32(data->adc_actual_sample_rate);
-		DacSampleRateHz[i] = FloatToHzU32(data->dac_actual_sample_rate);
 		if (valid_captures == 0U) {
-			phase_rad[i] = 0.0f;
-			Gain[i] = 0.0f;
+			PhaseMilliRad[i] = 0;
+			GainQ15[i] = 0U;
 			InputRmsMv[i] = 0U;
 			OutputRmsMv[i] = 0U;
 			InputDcMv[i] = 0U;
 			OutputDcMv[i] = 0U;
-			MagnitudeRepeatSpanCentiDb[i] = 0U;
-			PhaseRepeatSpanMilliRad[i] = 0U;
 			InputPpMv[i] = 0U;
 			OutputPpMv[i] = 0U;
 			ClipFlags[i] = 0U;
 			ValidCaptureCount[i] = 0U;
 		} else {
-			phase_rad[i] = MedianFloat32(phase_samples, valid_captures);
-			Gain[i] = MedianFloat32(gain_samples, valid_captures);
+			GainQ15[i] = FloatToQ15(MedianFloat32(gain_samples, valid_captures));
 			InputRmsMv[i] = FloatToScaledU16(MedianFloat32(input_rms_samples, valid_captures), 1000.0f);
 			OutputRmsMv[i] = FloatToScaledU16(MedianFloat32(output_rms_samples, valid_captures), 1000.0f);
 			InputDcMv[i] = FloatToScaledU16(MedianFloat32(input_dc_samples, valid_captures), 1000.0f);
 			OutputDcMv[i] = FloatToScaledU16(MedianFloat32(output_dc_samples, valid_captures), 1000.0f);
-			MagnitudeRepeatSpanCentiDb[i] = FloatToScaledU16(MagnitudeSpanDb(gain_samples, valid_captures), 100.0f);
-			PhaseRepeatSpanMilliRad[i] = FloatToScaledU16(SpanFloat32(phase_samples, valid_captures), 1000.0f);
 			InputPpMv[i] = FloatToScaledU16(MedianFloat32(input_pp_samples, valid_captures), 1000.0f);
 			OutputPpMv[i] = FloatToScaledU16(MedianFloat32(output_pp_samples, valid_captures), 1000.0f);
 			ClipFlags[i] = clip_flags_or;
 			ValidCaptureCount[i] = (uint16_t)valid_captures;
+			if (input_min_code < input_min_code_all) {
+				input_min_code_all = input_min_code;
+			}
+			if (input_max_code > input_max_code_all) {
+				input_max_code_all = input_max_code;
+			}
+			if (output_min_code < output_min_code_all) {
+				output_min_code_all = output_min_code;
+			}
+			if (output_max_code > output_max_code_all) {
+				output_max_code_all = output_max_code;
+			}
+			if ((clip_flags_or & 0x01U) != 0U) {
+				input_clip_points++;
+			}
+			if ((clip_flags_or & 0x02U) != 0U) {
+				output_clip_points++;
+			}
 		}
 
 		f_target += config->f_step;
 	}
 
-	printf("Magnitude_data=[");
-	for (uint16_t i = 0; i < steps; i++) {
-		if (i < steps - 1U) {
-			printf("%f,", Gain[i]);
-		} else {
-			printf("%f]\r\n", Gain[i]);
-		}
-	}
-
-	printf("Phase_data_rad=[");
-	for (uint16_t i = 0; i < steps; i++) {
-		if (i < steps - 1U) {
-			printf("%f,", phase_rad[i]);
-		} else {
-			printf("%f]\r\n", phase_rad[i]);
-		}
-	}
-
-	printf("Input_rms_v=[");
-	for (uint16_t i = 0; i < steps; i++) {
-		if (i < steps - 1U) {
-			printf("%f,", ((float32_t)InputRmsMv[i]) / 1000.0f);
-		} else {
-			printf("%f]\r\n", ((float32_t)InputRmsMv[i]) / 1000.0f);
-		}
-	}
-
-	printf("Output_rms_v=[");
-	for (uint16_t i = 0; i < steps; i++) {
-		if (i < steps - 1U) {
-			printf("%f,", ((float32_t)OutputRmsMv[i]) / 1000.0f);
-		} else {
-			printf("%f]\r\n", ((float32_t)OutputRmsMv[i]) / 1000.0f);
-		}
-	}
-
-	printf("Input_dc_v=[");
-	for (uint16_t i = 0; i < steps; i++) {
-		if (i < steps - 1U) {
-			printf("%f,", ((float32_t)InputDcMv[i]) / 1000.0f);
-		} else {
-			printf("%f]\r\n", ((float32_t)InputDcMv[i]) / 1000.0f);
-		}
-	}
-
-	printf("Output_dc_v=[");
-	for (uint16_t i = 0; i < steps; i++) {
-		if (i < steps - 1U) {
-			printf("%f,", ((float32_t)OutputDcMv[i]) / 1000.0f);
-		} else {
-			printf("%f]\r\n", ((float32_t)OutputDcMv[i]) / 1000.0f);
-		}
-	}
-
-	printf("Clip_flags=[");
-	for (uint16_t i = 0; i < steps; i++) {
-		if (i < steps - 1U) {
-			printf("%u,", (unsigned int)ClipFlags[i]);
-		} else {
-			printf("%u]\r\n", (unsigned int)ClipFlags[i]);
-		}
-	}
-
-	printf("Valid_capture_count=[");
-	for (uint16_t i = 0; i < steps; i++) {
-		if (i < steps - 1U) {
-			printf("%u,", (unsigned int)ValidCaptureCount[i]);
-		} else {
-			printf("%u]\r\n", (unsigned int)ValidCaptureCount[i]);
-		}
-	}
-
-	printf("Actual_freq_hz=[");
-	for (uint16_t i = 0; i < steps; i++) {
-		if (i < steps - 1U) {
-			printf("%lu,", (unsigned long)ActualFreqHz[i]);
-		} else {
-			printf("%lu]\r\n", (unsigned long)ActualFreqHz[i]);
-		}
-	}
-
-	printf("Adc_sample_rate_hz=[");
-	for (uint16_t i = 0; i < steps; i++) {
-		if (i < steps - 1U) {
-			printf("%lu,", (unsigned long)AdcSampleRateHz[i]);
-		} else {
-			printf("%lu]\r\n", (unsigned long)AdcSampleRateHz[i]);
-		}
-	}
-
-	printf("Dac_sample_rate_hz=[");
-	for (uint16_t i = 0; i < steps; i++) {
-		if (i < steps - 1U) {
-			printf("%lu,", (unsigned long)DacSampleRateHz[i]);
-		} else {
-			printf("%lu]\r\n", (unsigned long)DacSampleRateHz[i]);
-		}
-	}
-
-	printf("Magnitude_repeat_span_db=[");
-	for (uint16_t i = 0; i < steps; i++) {
-		if (i < steps - 1U) {
-			printf("%f,", ((float32_t)MagnitudeRepeatSpanCentiDb[i]) / 100.0f);
-		} else {
-			printf("%f]\r\n", ((float32_t)MagnitudeRepeatSpanCentiDb[i]) / 100.0f);
-		}
-	}
-
-	printf("Phase_repeat_span_rad=[");
-	for (uint16_t i = 0; i < steps; i++) {
-		if (i < steps - 1U) {
-			printf("%f,", ((float32_t)PhaseRepeatSpanMilliRad[i]) / 1000.0f);
-		} else {
-			printf("%f]\r\n", ((float32_t)PhaseRepeatSpanMilliRad[i]) / 1000.0f);
-		}
-	}
-
-	printf("Input_pp_v=[");
-	for (uint16_t i = 0; i < steps; i++) {
-		if (i < steps - 1U) {
-			printf("%f,", ((float32_t)InputPpMv[i]) / 1000.0f);
-		} else {
-			printf("%f]\r\n", ((float32_t)InputPpMv[i]) / 1000.0f);
-		}
-	}
-
-	printf("Output_pp_v=[");
-	for (uint16_t i = 0; i < steps; i++) {
-		if (i < steps - 1U) {
-			printf("%f,", ((float32_t)OutputPpMv[i]) / 1000.0f);
-		} else {
-			printf("%f]\r\n", ((float32_t)OutputPpMv[i]) / 1000.0f);
-		}
-	}
+	UART_PrintScaledU32Array("omega", OmegaMilliRadPerSec, steps, 1000.0f);
+	UART_PrintQ15Array("Magnitude_data", GainQ15, steps);
+	UART_PrintMilliRadArray("Phase_data_rad", PhaseMilliRad, steps);
+	UART_PrintScaledU16Array("Input_rms_v", InputRmsMv, steps, 1000.0f);
+	UART_PrintScaledU16Array("Output_rms_v", OutputRmsMv, steps, 1000.0f);
+	UART_PrintScaledU16Array("Input_dc_v", InputDcMv, steps, 1000.0f);
+	UART_PrintScaledU16Array("Output_dc_v", OutputDcMv, steps, 1000.0f);
+	UART_PrintU16Array("Clip_flags", ClipFlags, steps);
+	UART_PrintU16Array("Valid_capture_count", ValidCaptureCount, steps);
+	UART_PrintScaledU16Array("Input_pp_v", InputPpMv, steps, 1000.0f);
+	UART_PrintScaledU16Array("Output_pp_v", OutputPpMv, steps, 1000.0f);
+	printf("Adc_code_range=[%u,%u,%u,%u]\r\n",
+		(unsigned int)input_min_code_all,
+		(unsigned int)input_max_code_all,
+		(unsigned int)output_min_code_all,
+		(unsigned int)output_max_code_all);
+	printf("Clip_point_count=[%u,%u]\r\n",
+		(unsigned int)input_clip_points,
+		(unsigned int)output_clip_points);
 }
 
 
@@ -1168,46 +1171,13 @@ int main(void)
   MX_DAC1_Init();
   MX_TIM2_Init();
   /* USER CODE BEGIN 2 */
-//	HAL_TIM_Base_Start(&htim1);
-//	HAL_TIM_Base_Start(&htim2);
 	HAL_ADCEx_Calibration_Start(&hadc1, ADC_SINGLE_ENDED);
 	HAL_ADCEx_Calibration_Start(&hadc2, ADC_SINGLE_ENDED);
-	config.f_start = 100.0f;               // 起始频率：100 Hz
-	config.f_stop = 10000.0f;              // 终止频率：10000 Hz (10 kHz)
-	config.f_step = 100.0f;                // 步进频率：100 Hz
-	config.amplitude_V = 1.0f;             // 输出信号的峰峰值幅度：1.0 V (P-P)，中心偏置约 1.65 V
-	config.dac_sample_rate = 1000000.0f;    // DAC 采样率：200,000 Hz
-	config.DAC_MAX_VAL = 4095;             // DAC 最大数字值 (12位)
-	config.adc_sample_rate = 10000.0f;    // ADC 采样率：200,000 Hz
-	config.adc_buffersize = adc_buffer_size; // 采集点数：1024
-	config.num_log_steps=200;
-
-	// --- 2. 初始化运行时数据 StepSweepData_t ---
-	// 大部分字段在运行时由 Sweep_ExecuteStepSweep 或 wave_analys 填充/覆盖
-
-	data.current_freq = config.f_start; // 运行时起始频率设置为配置的起始频率
-	data.total_steps = 0;               // 在 Sweep_ExecuteStepSweep 中计算
-	data.phase = 0.0f;
-	data.gain = 0.0f;
-	data.new_arr_value = 999;
-	data.adc_actual_sample_rate = config.adc_sample_rate;
-	data.dac_timer_arr = 169;
-	data.dac_actual_sample_rate = config.dac_sample_rate;
-	data.actual_freq = config.f_start;
 
 	StepSweep_SetDefaultConfig(&config);
 	StepSweep_ResetRuntimeData(&data, &config);
 	
-	Generate_Hanning_Window(hanning_window_coeff, adc_buffer_size);
-//	Generate_FlatTop_Window(hanning_window_coeff,adc_buffer_size);
-	Sweep_ExecuteStepSweep(&config, &data);
-	
-//	HAL_ADC_Start_DMA(&hadc1,(uint32_t*)adc_buffer1,adc_buffer_size);
-//	HAL_ADC_Start_DMA(&hadc2,(uint32_t*)adc_buffer2,adc_buffer_size);
-//	
-////	HAL_DAC_SetValue(&hdac1,DAC_CHANNEL_1,DAC_ALIGN_12B_R,1000);
-//	HAL_DAC_Start(&hdac1,DAC_CHANNEL_1);
-//	HAL_DAC_Start_DMA(&hdac1,DAC_CHANNEL_1,(uint32_t*)test,20,DAC_ALIGN_12B_R);
+	UART_PrintHelp();
 	
   /* USER CODE END 2 */
 
@@ -1219,14 +1189,6 @@ int main(void)
 		if (SweepProtocol_ReadLine(cmd_line, sizeof(cmd_line))) {
 			UART_ProcessCommand(cmd_line);
 		}
-		
-//		if(adc_flag){
-//			for(int i=0;i<adc_buffer_size;i++){
-//				printf("%d,%d\r\n",adc_buffer1[i],adc_buffer2[i]);
-//			HAL_ADC_Start_DMA(&hadc1,(uint32_t*)adc_buffer1,adc_buffer_size);
-//			HAL_ADC_Start_DMA(&hadc2,(uint32_t*)adc_buffer2,adc_buffer_size);
-//			}
-//		}
 		
     /* USER CODE END WHILE */
 

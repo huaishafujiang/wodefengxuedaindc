@@ -9,7 +9,10 @@ import numpy as np
 from measurement_model import MeasurementFrame
 
 
-NUMBER_PATTERN = re.compile(r"[-+]?\d*\.\d+(?:[eE][-+]?\d+)?|[-+]?\d+(?:[eE][-+]?\d+)?")
+NUMBER_PATTERN = re.compile(
+    r"[-+]?(?:nan|inf|infinity|\d*\.\d+(?:[eE][-+]?\d+)?|\d+(?:[eE][-+]?\d+)?)",
+    re.IGNORECASE,
+)
 
 NAME_PATTERNS = {
     "omega": re.compile(r"^\s*omega\s*=\s*\[.*\]\s*$", re.IGNORECASE),
@@ -41,6 +44,12 @@ DIAGNOSTIC_PATTERNS = {
     ),
     "input_pp_v": re.compile(r"Input_pp_v\s*=\s*\[(.*?)\]", re.IGNORECASE | re.DOTALL),
     "output_pp_v": re.compile(r"Output_pp_v\s*=\s*\[(.*?)\]", re.IGNORECASE | re.DOTALL),
+    "input_min_code": re.compile(r"Input_min_code\s*=\s*\[(.*?)\]", re.IGNORECASE | re.DOTALL),
+    "input_max_code": re.compile(r"Input_max_code\s*=\s*\[(.*?)\]", re.IGNORECASE | re.DOTALL),
+    "output_min_code": re.compile(r"Output_min_code\s*=\s*\[(.*?)\]", re.IGNORECASE | re.DOTALL),
+    "output_max_code": re.compile(r"Output_max_code\s*=\s*\[(.*?)\]", re.IGNORECASE | re.DOTALL),
+    "adc_code_range": re.compile(r"Adc_code_range\s*=\s*\[(.*?)\]", re.IGNORECASE | re.DOTALL),
+    "clip_point_count": re.compile(r"Clip_point_count\s*=\s*\[(.*?)\]", re.IGNORECASE | re.DOTALL),
 }
 
 FRAME_TRAFFIC_PREFIXES = ("OK", "DONE", "ERR ", "WARN ", "READY", "Commands:")
@@ -114,6 +123,13 @@ def is_frame_noise(line: str) -> bool:
     return line in ("OK", "DONE") or line.startswith(FRAME_TRAFFIC_PREFIXES)
 
 
+def measurement_line_key(line: str) -> str | None:
+    for key, pattern in NAME_PATTERNS.items():
+        if pattern.match(line):
+            return key
+    return None
+
+
 def read_optional_diagnostics_from_serial(ser: SerialLike) -> dict[str, np.ndarray]:
     diagnostics: dict[str, np.ndarray] = {}
     original_timeout = ser.timeout
@@ -146,23 +162,38 @@ def read_measurement_frame_from_serial(
     source: str = "serial",
 ) -> MeasurementFrame:
     deadline = time.monotonic() + max(float(timeout_sec), 1.0)
+    pending: dict[str, np.ndarray] = {}
+    raw: dict[str, str] = {}
+
     while not stop_event.is_set() and time.monotonic() < deadline:
-        line1 = decode_serial_line(ser.readline())
-        if not line1 or not NAME_PATTERNS["omega"].match(line1):
+        line = decode_serial_line(ser.readline())
+        if not line:
             continue
 
-        line2 = decode_serial_line(ser.readline())
-        line3 = decode_serial_line(ser.readline())
-        if not NAME_PATTERNS["magnitude"].match(line2) or not NAME_PATTERNS["phase"].match(line3):
+        key = measurement_line_key(line)
+        if key is None:
+            continue
+
+        parsed = parse_array_from_line(line)
+        if key == "omega":
+            pending = {"omega": parsed}
+            raw = {"omega": line}
+        elif "omega" in pending:
+            pending[key] = parsed
+            raw[key] = line
+        else:
+            continue
+
+        if not {"omega", "magnitude", "phase"}.issubset(pending):
             continue
 
         frame = MeasurementFrame(
-            omega=parse_array_from_line(line1),
-            magnitude=parse_array_from_line(line2),
-            phase=parse_array_from_line(line3),
+            omega=pending["omega"],
+            magnitude=pending["magnitude"],
+            phase=pending["phase"],
             diagnostics=read_optional_diagnostics_from_serial(ser),
             source=source,
-            raw_lines=(line1, line2, line3),
+            raw_lines=(raw["omega"], raw["magnitude"], raw["phase"]),
         )
         frame.validate()
         return frame

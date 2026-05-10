@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="900" viewBox="0 0 1400 900">
+<style>
+.bg{fill:#fbfbf7}.title{font:700 42px 'Microsoft YaHei','SimHei',Arial,sans-serif;fill:#111827}.sub{font:24px 'Microsoft YaHei','SimHei',Arial,sans-serif;fill:#475467}.label{font:24px 'Microsoft YaHei','SimHei',Arial,sans-serif;fill:#111827}.small{font:20px 'Microsoft YaHei','SimHei',Arial,sans-serif;fill:#344054}.tiny{font:17px 'Microsoft YaHei','SimHei',Arial,sans-serif;fill:#667085}.wire{stroke:#111827;stroke-width:4;stroke-linecap:round;fill:none}.cap{stroke:#111827;stroke-width:4;stroke-linecap:round}.res{fill:#fff7d6;stroke:#111827;stroke-width:4}.op{fill:#eef6ff;stroke:#111827;stroke-width:4}.node{fill:#111827}.panel{fill:#fff;stroke:#d0d5dd;stroke-width:2}.railp{stroke:#e11d48;stroke-width:5}.railg{stroke:#2563eb;stroke-width:5}.hole{fill:#d0d5dd}.chip{fill:#222;stroke:#000;stroke-width:2}.chiptext{font:700 20px Arial,sans-serif;fill:#fff}.wireRed{stroke:#e11d48;stroke-width:5;fill:none;stroke-linecap:round}.wireBlue{stroke:#2563eb;stroke-width:5;fill:none;stroke-linecap:round}.wireYellow{stroke:#d97706;stroke-width:5;fill:none;stroke-linecap:round}.wireGreen{stroke:#16a34a;stroke-width:5;fill:none;stroke-linecap:round}.capbody{fill:#fbbf24;stroke:#92400e;stroke-width:2}.resbody{fill:#f5deb3;stroke:#92400e;stroke-width:2}.stage{fill:#f8fafc;stroke:#cbd5e1;stroke-width:2;stroke-dasharray:8 6}
+</style>
+<rect class="bg" width="100%" height="100%"/>
+<text class="title" x="700" y="62" text-anchor="middle">带通 原理图</text>
+<text class="sub" x="700" y="102" text-anchor="middle">适合 STM32 测量：高通：3.3kΩ/100nF；低通：10kΩ/1nF，截止/中心频率 482Hz - 15.9kHz</text>
+<rect class="panel" x="70" y="140" width="1260" height="650" rx="14"/>
+<text class="label" x="105" y="335" text-anchor="start">Vin</text>
+<text class="label" x="1250" y="335" text-anchor="start">Vout</text>
+<line class="wire" x1="140" y1="330" x2="180" y2="330"/>
+<rect class="stage" x="170" y="210" width="430" height="260" rx="10"/>
+<text class="small" x="385" y="235" text-anchor="middle">高通段 fL≈482Hz</text>
+<line class="wire" x1="180" y1="330" x2="237" y2="330"/>
+<line class="wire" x1="273" y1="330" x2="330" y2="330"/>
+<line class="cap" x1="237" y1="298" x2="237" y2="362"/>
+<line class="cap" x1="273" y1="298" x2="273" y2="362"/>
+<text class="small" x="255" y="288" text-anchor="middle">100nF</text>
+<circle class="node" cx="330" cy="330" r="5"/>
+<line class="wire" x1="330" y1="330" x2="330" y2="354"/>
+<line class="wire" x1="330" y1="411" x2="330" y2="435"/>
+<rect class="res" x="316" y="354" width="28" height="57" rx="3"/>
+<text class="small" x="376" y="382.5" text-anchor="start">3.3kΩ</text>
+<line class="wire" x1="330" y1="435" x2="330" y2="453"/>
+<line class="wire" x1="304" y1="453" x2="356" y2="453"/>
+<line class="wire" x1="312" y1="463" x2="348" y2="463"/>
+<line class="wire" x1="321" y1="473" x2="339" y2="473"/>
+<line class="wire" x1="330" y1="330" x2="402" y2="330"/>
+<polygon class="op" points="402,268 402,392 532,330"/>
+<text class="label" x="416" y="308" text-anchor="middle">+</text>
+<text class="label" x="416" y="366" text-anchor="middle">−</text>
+<text class="small" x="464" y="337" text-anchor="middle">LM358</text>
+<line class="wire" x1="532" y1="330" x2="572" y2="330"/>
+<circle class="node" cx="572" cy="330" r="5"/>
+<line class="wire" x1="402" y1="330" x2="402" y2="302"/>
+<line class="wire" x1="572" y1="330" x2="572" y2="418"/>
+<line class="wire" x1="572" y1="418" x2="402" y2="418"/>
+<line class="wire" x1="402" y1="418" x2="402" y2="364"/>
+<rect class="stage" x="622" y="210" width="430" height="260" rx="10"/>
+<text class="small" x="837" y="235" text-anchor="middle">低通段 fH≈15.9kHz</text>
+<line class="wire" x1="642" y1="330" x2="670" y2="330"/>
+<line class="wire" x1="764" y1="330" x2="792" y2="330"/>
+<rect class="res" x="670" y="316" width="94" height="28" rx="3"/>
+<text class="small" x="717" y="304" text-anchor="middle">10kΩ</text>
+<circle class="node" cx="792" cy="330" r="5"/>
+<line class="wire" x1="792" y1="330" x2="792" y2="358"/>
+<line class="cap" x1="765" y1="358" x2="819" y2="358"/>
+<line class="cap" x1="765" y1="374" x2="819" y2="374"/>
+<line class="wire" x1="792" y1="374" x2="792" y2="402"/>
+<line class="wire" x1="792" y1="402" x2="792" y2="420"/>
+<line class="wire" x1="766" y1="420" x2="818" y2="420"/>
+<line class="wire" x1="774" y1="430" x2="810" y2="430"/>
+<line class="wire" x1="783" y1="440" x2="801" y2="440"/>
+<text class="small" x="838" y="375" text-anchor="start">1nF</text>
+<line class="wire" x1="792" y1="330" x2="864" y2="330"/>
+<polygon class="op" points="864,268 864,392 994,330"/>
+<text class="label" x="878" y="308" text-anchor="middle">+</text>
+<text class="label" x="878" y="366" text-anchor="middle">−</text>
+<text class="small" x="926" y="337" text-anchor="middle">LM358</text>
+<line class="wire" x1="994" y1="330" x2="1034" y2="330"/>
+<circle class="node" cx="1034" cy="330" r="5"/>
+<line class="wire" x1="864" y1="330" x2="864" y2="302"/>
+<line class="wire" x1="1034" y1="330" x2="1034" y2="418"/>
+<line class="wire" x1="1034" y1="418" x2="864" y2="418"/>
+<line class="wire" x1="864" y1="418" x2="864" y2="364"/>
+<line class="wire" x1="1074" y1="330" x2="1220" y2="330"/>
+<text class="sub" x="700" y="835" text-anchor="middle">提示：LM358 8脚接 +5V，4脚接 GND；STM32 ADC 输入建议把交流信号偏置到约 1.65V，避免负半周被削掉。</text>
+</svg>
