@@ -109,6 +109,19 @@ def _write_diagnostics_csv(path: Path, session: Any) -> None:
                     getattr(finding, "suggestion", ""),
                 ]
             )
+        component_report = getattr(diagnosis, "component_deviation_report", None)
+        if component_report is not None and getattr(component_report, "enabled", False):
+            writer.writerow(["component", "summary", getattr(component_report, "summary", ""), "", ""])
+            for candidate in getattr(component_report, "candidates", []) or []:
+                writer.writerow(
+                    [
+                        "component",
+                        getattr(candidate, "component", ""),
+                        _fmt(getattr(candidate, "confidence", None), 4),
+                        getattr(candidate, "evidence", ""),
+                        getattr(candidate, "suggestion", ""),
+                    ]
+                )
         for suggestion in getattr(diagnosis, "next_test_suggestions", []) or []:
             writer.writerow(["suggestion", "", suggestion, "", ""])
 

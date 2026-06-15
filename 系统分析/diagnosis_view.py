@@ -92,12 +92,15 @@ def structured_diagnosis_sections(session: Any | None) -> dict[str, str]:
         }
 
     findings = getattr(diagnosis, "fault_findings", []) or []
+    component_report = getattr(diagnosis, "component_deviation_report", None)
     evidence = "；".join(
         f"{getattr(item, 'name', '')}({getattr(item, 'severity', '')}): {getattr(item, 'evidence', '')}"
         for item in findings
     )
     if not evidence:
         evidence = "暂未触发故障知识库规则"
+    if component_report is not None and getattr(component_report, "enabled", False):
+        evidence = f"{getattr(component_report, 'summary', '')}；{evidence}"
 
     return {
         "判定": str(getattr(diagnosis, "system_label", "未知")),
@@ -117,6 +120,10 @@ def diagnosis_clipboard_text(session: Any | None) -> str:
     calibration_label = getattr(session, "calibration_label", "") if session is not None else ""
     if calibration_label:
         lines.append(f"参考校正: {calibration_label}")
+    diagnosis = getattr(session, "ai_diagnosis", None) if session is not None else None
+    component_report = getattr(diagnosis, "component_deviation_report", None) if diagnosis is not None else None
+    if component_report is not None and getattr(component_report, "enabled", False):
+        lines.append(f"元件偏差: {getattr(component_report, 'summary', '')}")
     remark = getattr(session, "remark", "") if session is not None else ""
     if remark:
         lines.append(f"备注: {remark}")

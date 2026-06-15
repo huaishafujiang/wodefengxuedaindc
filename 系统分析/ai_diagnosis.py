@@ -8,6 +8,11 @@ from typing import Any
 
 import numpy as np
 
+from component_diagnosis import (
+    ComponentDeviationReport,
+    diagnose_component_deviation,
+    format_component_report_lines,
+)
 from serial_protocol import build_sweep_command
 
 try:
@@ -163,6 +168,7 @@ class IntelligentDiagnosis:
     fault_findings: list[FaultFinding] = field(default_factory=list)
     active_sweep_plan: list[ActiveSweepStep] = field(default_factory=list)
     equivalent_transfer_function: EquivalentTransferFunction | None = None
+    component_deviation_report: ComponentDeviationReport | None = None
     needs_resweep_confirmation: bool = False
     decision_strategy: str = ""
 
@@ -1503,6 +1509,7 @@ def run_intelligent_diagnosis(
     phase_rad,
     diagnostics: dict[str, np.ndarray] | None = None,
     analysis_result: Any | None = None,
+    component_profile: Any | None = None,
 ) -> IntelligentDiagnosis:
     features = extract_diagnosis_features(omega, magnitude, phase_rad, diagnostics)
     model_fits = fit_transfer_templates(omega, magnitude, phase_rad)
@@ -1537,6 +1544,28 @@ def run_intelligent_diagnosis(
     if not possible_faults:
         possible_faults = ["暂未发现明显硬件故障，优先按关键频率附近补扫确认。"]
 
+    component_report = None
+    if component_profile is not None:
+        try:
+            component_report = diagnose_component_deviation(omega, magnitude, phase_rad, component_profile)
+            if component_report.enabled and component_report.has_significant_deviation:
+                possible_faults.insert(0, component_report.summary)
+                suggestions.insert(0, component_report.candidates[0].suggestion)
+                confidence = min(confidence, 0.92)
+            elif component_report.enabled and component_report.notes:
+                suggestions.extend(component_report.notes[:2])
+        except Exception as exc:
+            component_report = ComponentDeviationReport(
+                enabled=True,
+                circuit_label=getattr(component_profile, "circuit_label", "Auto"),
+                circuit_type=getattr(component_profile, "circuit_type", "unknown"),
+                order=int(getattr(component_profile, "order", 0) or 0),
+                baseline_rmse_db=None,
+                best_rmse_db=None,
+                summary=f"元件偏差诊断失败: {exc}",
+                notes=[str(exc)],
+            )
+
     circuit_label = CIRCUIT_TYPE_LABELS.get(circuit_type, "未知")
     return IntelligentDiagnosis(
         circuit_type=circuit_type,
@@ -1561,6 +1590,7 @@ def run_intelligent_diagnosis(
         fault_findings=fault_findings,
         active_sweep_plan=sweep_steps,
         equivalent_transfer_function=best_fit.transfer_function if best_fit is not None else None,
+        component_deviation_report=component_report,
         needs_resweep_confirmation=needs_resweep,
         decision_strategy=decision_strategy,
     )
@@ -1627,6 +1657,8 @@ def format_ai_diagnosis_report_lines(diagnosis: IntelligentDiagnosis) -> list[st
         lines.append("模型拟合: 当前环境缺少 scipy.optimize，已退回到特征规则诊断。")
     else:
         lines.append("模型拟合: 数据点不足或模板未收敛，已退回到特征规则诊断。")
+
+    lines.extend(format_component_report_lines(diagnosis.component_deviation_report))
 
     lines.extend(
         [

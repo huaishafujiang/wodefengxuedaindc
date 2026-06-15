@@ -29,6 +29,7 @@ from calibration import (
     build_calibration_profile,
     profile_summary,
 )
+from component_diagnosis import profile_from_inputs
 from diagnosis_view import diagnosis_clipboard_text, structured_diagnosis_sections
 from filter_analysis import (
     EXPECTED_CIRCUIT_CHOICES,
@@ -275,6 +276,11 @@ class MatlabExactApp:
         self.expected_circuit_var = tk.StringVar(value="Auto")
         self.calibration_enabled_var = tk.BooleanVar(value=True)
         self.calibration_summary_var = tk.StringVar(value="未设置校正参考")
+        self.component_diagnosis_enabled_var = tk.BooleanVar(value=False)
+        self.component_r_values_var = tk.StringVar(value="10k")
+        self.component_c_values_var = tk.StringVar(value="10n")
+        self.component_r2_values_var = tk.StringVar(value="10k")
+        self.component_c2_values_var = tk.StringVar(value="10n")
 
     def _build_top_toolbar(self, parent):
         toolbar = ttk.Frame(parent, padding=(12, 8), style="Toolbar.TFrame")
@@ -455,17 +461,20 @@ class MatlabExactApp:
         report_tab = ttk.Frame(notebook, padding=8, style="Surface.TFrame")
         advanced_tab = ttk.Frame(notebook, padding=10, style="Surface.TFrame")
         calibration_tab = ttk.Frame(notebook, padding=10, style="Surface.TFrame")
+        component_tab = ttk.Frame(notebook, padding=10, style="Surface.TFrame")
         export_tab = ttk.Frame(notebook, padding=10, style="Surface.TFrame")
         notebook.add(log_tab, text="流水日志")
         notebook.add(report_tab, text="详细报告")
         notebook.add(advanced_tab, text="高级扫频参数")
         notebook.add(calibration_tab, text="参考校正")
+        notebook.add(component_tab, text="元件偏差诊断")
         notebook.add(export_tab, text="导出设置")
 
         self._build_log_tab(log_tab)
         self._build_report_tab(report_tab)
         self._build_advanced_tab(advanced_tab)
         self._build_calibration_tab(calibration_tab)
+        self._build_component_diagnosis_tab(component_tab)
         self._build_export_tab(export_tab)
 
     def _build_log_tab(self, parent):
@@ -584,6 +593,29 @@ class MatlabExactApp:
         )
         ttk.Label(parent, text=hint, style="SurfaceMuted.TLabel", wraplength=980).grid(
             row=3, column=0, sticky="ew", pady=(10, 0)
+        )
+
+    def _build_component_diagnosis_tab(self, parent):
+        parent.columnconfigure(1, weight=1)
+        parent.columnconfigure(3, weight=1)
+
+        ttk.Checkbutton(
+            parent,
+            text="启用单元件偏差诊断",
+            variable=self.component_diagnosis_enabled_var,
+        ).grid(row=0, column=0, columnspan=4, sticky="w", pady=(0, 10))
+
+        self._entry(parent, 1, 0, "R 标称列表", self.component_r_values_var, width=26, padx=(6, 18))
+        self._entry(parent, 1, 2, "C 标称列表", self.component_c_values_var, width=26, padx=(6, 0))
+        self._entry(parent, 2, 0, "第二组 R", self.component_r2_values_var, width=26, padx=(6, 18))
+        self._entry(parent, 2, 2, "第二组 C", self.component_c2_values_var, width=26, padx=(6, 0))
+
+        hint = (
+            "低通/高通可填单个值并自动扩展到阶数，也可填 10k,10k,10k；"
+            "带通/带阻使用第一组和第二组 R/C 估计两个边界或中心频率。"
+        )
+        ttk.Label(parent, text=hint, style="SurfaceMuted.TLabel", wraplength=980).grid(
+            row=3, column=0, columnspan=4, sticky="ew", pady=(10, 0)
         )
 
     def _build_export_tab(self, parent):
@@ -848,6 +880,9 @@ class MatlabExactApp:
         assumed_p = self._get_assumed_open_loop_poles()
         if assumed_p is None:
             return None
+        component_profile = self._component_profile_from_ui(show_errors=True)
+        if component_profile is None and bool(self.component_diagnosis_enabled_var.get()):
+            return None
         try:
             return {
                 "smooth": bool(self.smooth_var.get()),
@@ -856,9 +891,28 @@ class MatlabExactApp:
                 "fix_g431_axis": bool(self.fix_var.get()),
                 "assumed_open_loop_rhp_poles": int(assumed_p),
                 "invert_transfer": bool(self.swap_io_var.get()),
+                "component_profile": component_profile,
             }
         except ValueError:
             messagebox.showwarning("提示", "分析参数格式不正确。")
+            return None
+
+    def _component_profile_from_ui(self, show_errors: bool = True):
+        if not bool(self.component_diagnosis_enabled_var.get()):
+            return None
+        try:
+            return profile_from_inputs(
+                self.expected_circuit_var.get().strip() or "Auto",
+                self.component_r_values_var.get(),
+                self.component_c_values_var.get(),
+                self.component_r2_values_var.get(),
+                self.component_c2_values_var.get(),
+                enabled=True,
+                calibrated=self.calibration_profile is not None and bool(self.calibration_enabled_var.get()),
+            )
+        except Exception as exc:
+            if show_errors:
+                messagebox.showwarning("元件偏差诊断参数错误", str(exc))
             return None
 
     def _start_reader(self, command):
@@ -1022,6 +1076,7 @@ class MatlabExactApp:
                 session.phase,
                 diagnostics=session.diagnostics,
                 analysis_result=session.result,
+                component_profile=session.analysis_settings.get("component_profile"),
             )
             session.ai_diagnosis = diagnosis
             session.report_lines = self._build_session_report_lines(session, session.result, diagnosis)
@@ -1153,6 +1208,7 @@ class MatlabExactApp:
     def _analysis_worker(self, session: MeasurementSession):
         try:
             settings = dict(session.analysis_settings)
+            component_profile = settings.pop("component_profile", None)
             result = analyze_system_v2(
                 session.omega,
                 session.magnitude,
@@ -1172,6 +1228,7 @@ class MatlabExactApp:
                 session.phase,
                 diagnostics=session.diagnostics,
                 analysis_result=result,
+                component_profile=component_profile,
             )
             session.result = result
             session.ai_diagnosis = diagnosis
