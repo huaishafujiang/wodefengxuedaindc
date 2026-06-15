@@ -89,10 +89,22 @@ typedef enum {
 	SWEEP_CMD_PING,
 	SWEEP_CMD_HELP,
 	SWEEP_CMD_DEFAULT,
+	SWEEP_CMD_STOP,
 	SWEEP_CMD_SWEEP,
 	SWEEP_CMD_INVALID_SWEEP,
 	SWEEP_CMD_UNKNOWN
 } SweepCommandId_t;
+
+typedef enum {
+	SWEEP_RUN_DONE = 0,
+	SWEEP_RUN_STOPPED
+} SweepRunStatus_t;
+
+typedef enum {
+	STEP_CAPTURE_TIMEOUT = 0,
+	STEP_CAPTURE_DONE,
+	STEP_CAPTURE_STOPPED
+} StepSweepCaptureStatus_t;
 
 typedef struct {
 	SweepCommandId_t id;
@@ -134,6 +146,15 @@ typedef struct {
     float32_t phase_diff_rad; // 相位差 (Phase2 - Phase1)
 } AnalysisOutput_t;
 
+typedef struct {
+    uint16_t input_min_code_all;
+    uint16_t input_max_code_all;
+    uint16_t output_min_code_all;
+    uint16_t output_max_code_all;
+    uint16_t input_clip_points;
+    uint16_t output_clip_points;
+} SweepOutputSummary_t;
+
 float32_t fft_input1[adc_buffer_size*2];
 float32_t fft_input2[adc_buffer_size*2];
 struct PhaseData {
@@ -171,13 +192,24 @@ uint16_t InputPpMv[MAX_FREQ_STEPS];
 uint16_t OutputPpMv[MAX_FREQ_STEPS];
 uint16_t ClipFlags[MAX_FREQ_STEPS];
 uint16_t ValidCaptureCount[MAX_FREQ_STEPS];
+uint32_t ActualFreqMilliHz[MAX_FREQ_STEPS];
+uint32_t AdcSampleRateMilliHz[MAX_FREQ_STEPS];
+uint32_t DacSampleRateMilliHz[MAX_FREQ_STEPS];
+uint16_t MagnitudeRepeatSpanMilliDb[MAX_FREQ_STEPS];
+uint16_t PhaseRepeatSpanMilliRad[MAX_FREQ_STEPS];
+uint16_t InputMinCode[MAX_FREQ_STEPS];
+uint16_t InputMaxCode[MAX_FREQ_STEPS];
+uint16_t OutputMinCode[MAX_FREQ_STEPS];
+uint16_t OutputMaxCode[MAX_FREQ_STEPS];
+static volatile bool sweep_stop_requested = false;
 
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 /* USER CODE BEGIN PFP */
-void Sweep_ExecuteStepSweep(StepSweepConfig_t *config, StepSweepData_t *data);
+SweepRunStatus_t Sweep_ExecuteStepSweep(StepSweepConfig_t *config, StepSweepData_t *data);
+static void SweepProtocol_CheckStopRequest(void);
 
 /* USER CODE END PFP */
 
@@ -229,6 +261,126 @@ static void StepSweep_ResetRuntimeData(StepSweepData_t *state, const StepSweepCo
 	state->adc_timer_prescaler = TIM1_ADC_PRESCALER;
 }
 
+static void StepSweep_ResetPhaseTracker(void)
+{
+	data_phase.phase_unwrapped = 0.0f;
+	data_phase.last_phase_raw = 0.0f;
+	data_phase.unwrap_offset = 0.0f;
+	data_phase.first_point = 1;
+}
+
+static void StepSweep_ClearPointResult(uint16_t index)
+{
+	GainQ15[index] = 0U;
+	PhaseMilliRad[index] = 0;
+	OmegaMilliRadPerSec[index] = 0UL;
+	InputRmsMv[index] = 0U;
+	OutputRmsMv[index] = 0U;
+	InputDcMv[index] = 0U;
+	OutputDcMv[index] = 0U;
+	InputPpMv[index] = 0U;
+	OutputPpMv[index] = 0U;
+	ClipFlags[index] = 0U;
+	ValidCaptureCount[index] = 0U;
+	ActualFreqMilliHz[index] = 0UL;
+	AdcSampleRateMilliHz[index] = 0UL;
+	DacSampleRateMilliHz[index] = 0UL;
+	MagnitudeRepeatSpanMilliDb[index] = 0U;
+	PhaseRepeatSpanMilliRad[index] = 0U;
+	InputMinCode[index] = 0U;
+	InputMaxCode[index] = 0U;
+	OutputMinCode[index] = 0U;
+	OutputMaxCode[index] = 0U;
+}
+
+static void StepSweep_StopPeripherals(void)
+{
+	HAL_TIM_Base_Stop(&htim1);
+	HAL_TIM_Base_Stop(&htim2);
+	HAL_ADC_Stop_DMA(&hadc1);
+	HAL_ADC_Stop_DMA(&hadc2);
+	HAL_DAC_Stop_DMA(&hdac1, DAC_CHANNEL_1);
+	adc1_flag = false;
+	adc2_flag = false;
+	adc_flag = false;
+}
+
+static void SweepOutputSummary_Init(SweepOutputSummary_t *summary)
+{
+	summary->input_min_code_all = 0xFFFFU;
+	summary->input_max_code_all = 0U;
+	summary->output_min_code_all = 0xFFFFU;
+	summary->output_max_code_all = 0U;
+	summary->input_clip_points = 0U;
+	summary->output_clip_points = 0U;
+}
+
+static void SweepOutputSummary_AddPoint(
+	SweepOutputSummary_t *summary,
+	uint16_t input_min_code,
+	uint16_t input_max_code,
+	uint16_t output_min_code,
+	uint16_t output_max_code,
+	uint16_t clip_flags)
+{
+	if (input_min_code < summary->input_min_code_all) {
+		summary->input_min_code_all = input_min_code;
+	}
+	if (input_max_code > summary->input_max_code_all) {
+		summary->input_max_code_all = input_max_code;
+	}
+	if (output_min_code < summary->output_min_code_all) {
+		summary->output_min_code_all = output_min_code;
+	}
+	if (output_max_code > summary->output_max_code_all) {
+		summary->output_max_code_all = output_max_code;
+	}
+	if ((clip_flags & 0x01U) != 0U) {
+		summary->input_clip_points++;
+	}
+	if ((clip_flags & 0x02U) != 0U) {
+		summary->output_clip_points++;
+	}
+}
+
+static void StepSweep_ApplyTimerSettings(const StepSweepData_t *state)
+{
+	HAL_DAC_Stop_DMA(&hdac1, DAC_CHANNEL_1);
+	HAL_TIM_Base_Stop(&htim1);
+	HAL_TIM_Base_Stop(&htim2);
+
+	__HAL_TIM_SET_PRESCALER(&htim1, state->adc_timer_prescaler);
+	__HAL_TIM_SET_AUTORELOAD(&htim1, state->new_arr_value);
+	__HAL_TIM_SET_PRESCALER(&htim2, TIM2_DAC_PRESCALER);
+	__HAL_TIM_SET_AUTORELOAD(&htim2, state->dac_timer_arr);
+	__HAL_TIM_SET_COUNTER(&htim1, 0);
+	__HAL_TIM_SET_COUNTER(&htim2, 0);
+	HAL_TIM_GenerateEvent(&htim1, TIM_EVENTSOURCE_UPDATE);
+	HAL_TIM_GenerateEvent(&htim2, TIM_EVENTSOURCE_UPDATE);
+	__HAL_TIM_SET_COUNTER(&htim1, 0);
+	__HAL_TIM_SET_COUNTER(&htim2, 0);
+}
+
+static uint32_t StepSweep_SettleTimeMs(float32_t frequency_hz)
+{
+	uint32_t settle_time_ms = (uint32_t)ceilf((SETTLING_SIGNAL_PERIODS / frequency_hz) * 1000.0f);
+	if (settle_time_ms < 2U) {
+		settle_time_ms = 2U;
+	}
+	return settle_time_ms;
+}
+
+static uint32_t StepSweep_CaptureTimeoutMs(const StepSweepConfig_t *cfg, const StepSweepData_t *state)
+{
+	uint32_t capture_time_ms = (uint32_t)ceilf(
+		((float32_t)cfg->adc_buffersize / state->adc_actual_sample_rate) * 1000.0f
+	) + ADC_CAPTURE_GUARD_MS;
+	if (capture_time_ms < 5U) {
+		capture_time_ms = 5U;
+	}
+	return capture_time_ms;
+}
+
 static void StepSweep_ConfigureAdcTimer(StepSweepData_t *state, float32_t target_sample_rate)
 {
 	if (target_sample_rate < 1.0f) {
@@ -266,15 +418,20 @@ static void StepSweep_ConfigureAdcTimer(StepSweepData_t *state, float32_t target
 		TIM1_COUNTER_CLK_HZ / (((float32_t)prescaler + 1.0f) * ((float32_t)state->new_arr_value + 1.0f));
 }
 
-static bool StepSweep_WaitForAdcCapture(uint32_t timeout_ms)
+static StepSweepCaptureStatus_t StepSweep_WaitForAdcCapture(uint32_t timeout_ms)
 {
 	uint32_t start_tick = HAL_GetTick();
 	while (!adc_flag) {
+		SweepProtocol_CheckStopRequest();
+		if (sweep_stop_requested) {
+			StepSweep_StopPeripherals();
+			return STEP_CAPTURE_STOPPED;
+		}
 		if ((HAL_GetTick() - start_tick) >= timeout_ms) {
-			return false;
+			return STEP_CAPTURE_TIMEOUT;
 		}
 	}
-	return true;
+	return STEP_CAPTURE_DONE;
 }
 
 static bool StepSweep_ValidateConfig(const StepSweepConfig_t *cfg)
@@ -372,11 +529,59 @@ static bool SweepProtocol_ReadLine(char *line, uint16_t line_size)
 	}
 }
 
+static bool SweepProtocol_ReadLineNonBlocking(char *line, uint16_t line_size)
+{
+	static char pending[UART_CMD_BUFFER_SIZE];
+	static uint16_t pos = 0;
+	uint8_t ch = 0;
+
+	if (line_size == 0U) {
+		return false;
+	}
+
+	while (HAL_UART_Receive(&huart1, &ch, 1, 0U) == HAL_OK) {
+		if (ch == '\r') {
+			continue;
+		}
+		if (ch == '\n') {
+			pending[pos] = '\0';
+			strncpy(line, pending, line_size - 1U);
+			line[line_size - 1U] = '\0';
+			pos = 0U;
+			return true;
+		}
+		if (pos < (uint16_t)(sizeof(pending) - 1U)) {
+			pending[pos++] = (char)ch;
+		}
+		if (pos >= (uint16_t)(sizeof(pending) - 1U)) {
+			pending[pos] = '\0';
+			strncpy(line, pending, line_size - 1U);
+			line[line_size - 1U] = '\0';
+			pos = 0U;
+			return true;
+		}
+	}
+
+	return false;
+}
+
+static void SweepProtocol_CheckStopRequest(void)
+{
+	char line[UART_CMD_BUFFER_SIZE];
+	if (!SweepProtocol_ReadLineNonBlocking(line, sizeof(line))) {
+		return;
+	}
+	if (CommandMatches(SkipSpaces(line), "STOP")) {
+		sweep_stop_requested = true;
+	}
+}
+
 static void UART_PrintHelp(void)
 {
 	printf("READY STM32G431_SWEEP_V1\r\n");
 	printf("Commands:\r\n");
 	printf("  SWEEP <start_hz> <stop_hz> <step_hz> <amplitude_vpp>\r\n");
+	printf("  STOP\r\n");
 	printf("  DEFAULT\r\n");
 	printf("  PING\r\n");
 	printf("Tip: bias AC-coupled HP/BP nodes to about 1.65V before ADC/LM358.\r\n");
@@ -404,6 +609,11 @@ static bool SweepProtocol_ParseCommand(char *line, SweepCommand_t *command)
 
 	if (CommandMatches(cmd, "DEFAULT")) {
 		command->id = SWEEP_CMD_DEFAULT;
+		return true;
+	}
+
+	if (CommandMatches(cmd, "STOP")) {
+		command->id = SWEEP_CMD_STOP;
 		return true;
 	}
 
@@ -449,6 +659,12 @@ static void SweepCommand_Execute(const SweepCommand_t *command)
 			config.f_start, config.f_stop, config.f_step, config.amplitude_V);
 		return;
 
+	case SWEEP_CMD_STOP:
+		sweep_stop_requested = true;
+		StepSweep_StopPeripherals();
+		printf("STOPPED %lu/%lu\r\n", (unsigned long)0UL, (unsigned long)data.total_steps);
+		return;
+
 	case SWEEP_CMD_INVALID_SWEEP:
 		printf("ERR usage: SWEEP <start_hz> <stop_hz> <step_hz> <amplitude_vpp>\r\n");
 		return;
@@ -460,9 +676,12 @@ static void SweepCommand_Execute(const SweepCommand_t *command)
 
 		config = command->requested_config;
 		StepSweep_ResetRuntimeData(&data, &config);
+		sweep_stop_requested = false;
 		printf("OK SWEEP %.3f %.3f %.3f %.3f\r\n",
 			config.f_start, config.f_stop, config.f_step, config.amplitude_V);
-		Sweep_ExecuteStepSweep(&config, &data);
+		if (Sweep_ExecuteStepSweep(&config, &data) == SWEEP_RUN_STOPPED) {
+			return;
+		}
 		printf("DONE\r\n");
 		return;
 
@@ -836,18 +1055,15 @@ arm_status StepSweep_Generate_Data(float32_t frequency,
  * @param data 运行时数据和缓冲区
  */
 
-void Sweep_ExecuteStepSweep(
+SweepRunStatus_t Sweep_ExecuteStepSweep(
     StepSweepConfig_t *config,
     StepSweepData_t *data
 ){
 	if (config->f_step <= 0.0f || config->f_stop < config->f_start) {
-		return;
+		return SWEEP_RUN_DONE;
 	}
 
-	data_phase.phase_unwrapped = 0.0f;
-	data_phase.last_phase_raw = 0.0f;
-	data_phase.unwrap_offset = 0.0f;
-	data_phase.first_point = 1;
+	StepSweep_ResetPhaseTracker();
 
 	float32_t f_target = config->f_start;
 	float32_t f_dac = config->dac_sample_rate;
@@ -860,12 +1076,8 @@ void Sweep_ExecuteStepSweep(
 	config->num_log_steps = (uint16_t)computed_steps;
 	uint16_t steps = config->num_log_steps;
 	data->total_steps = steps;
-	uint16_t input_min_code_all = 0xFFFFU;
-	uint16_t input_max_code_all = 0U;
-	uint16_t output_min_code_all = 0xFFFFU;
-	uint16_t output_max_code_all = 0U;
-	uint16_t input_clip_points = 0U;
-	uint16_t output_clip_points = 0U;
+	SweepOutputSummary_t output_summary;
+	SweepOutputSummary_Init(&output_summary);
 
 	for (uint16_t i = 0; i < steps; i++) {
 		float32_t M_target_f = (f_target * N_max) / f_dac;
@@ -905,46 +1117,19 @@ void Sweep_ExecuteStepSweep(
 		OmegaMilliRadPerSec[i] = FloatToScaledU32(data->current_freq * 2.0f * PI, 1000.0f);
 
 		if (StepSweep_Generate_Data(data->current_freq, config, data) != ARM_MATH_SUCCESS) {
-			GainQ15[i] = 0U;
-			PhaseMilliRad[i] = 0;
-			InputRmsMv[i] = 0U;
-			OutputRmsMv[i] = 0U;
-			InputDcMv[i] = 0U;
-			OutputDcMv[i] = 0U;
-			InputPpMv[i] = 0U;
-			OutputPpMv[i] = 0U;
-			ClipFlags[i] = 0U;
-			ValidCaptureCount[i] = 0U;
+			StepSweep_ClearPointResult(i);
 			f_target += config->f_step;
 			continue;
 		}
 
 		float32_t adc_target_fs = data->current_freq * ADC_SAMPLES_PER_SIGNAL_PERIOD;
 		StepSweep_ConfigureAdcTimer(data, adc_target_fs);
-
-		HAL_DAC_Stop_DMA(&hdac1, DAC_CHANNEL_1);
-		HAL_TIM_Base_Stop(&htim1);
-		HAL_TIM_Base_Stop(&htim2);
-
-		__HAL_TIM_SET_PRESCALER(&htim1, data->adc_timer_prescaler);
-		__HAL_TIM_SET_AUTORELOAD(&htim1, data->new_arr_value);
-		__HAL_TIM_SET_PRESCALER(&htim2, TIM2_DAC_PRESCALER);
-		__HAL_TIM_SET_AUTORELOAD(&htim2, data->dac_timer_arr);
-		__HAL_TIM_SET_COUNTER(&htim1, 0);
-		__HAL_TIM_SET_COUNTER(&htim2, 0);
-		HAL_TIM_GenerateEvent(&htim1, TIM_EVENTSOURCE_UPDATE);
-		HAL_TIM_GenerateEvent(&htim2, TIM_EVENTSOURCE_UPDATE);
-		__HAL_TIM_SET_COUNTER(&htim1, 0);
-		__HAL_TIM_SET_COUNTER(&htim2, 0);
+		StepSweep_ApplyTimerSettings(data);
 
 		HAL_DAC_Start_DMA(&hdac1, DAC_CHANNEL_1, (uint32_t*)data->dac_buffer, data->dac_actual_length, DAC_ALIGN_12B_R);
 		HAL_TIM_Base_Start(&htim2);
 
-		uint32_t settle_time_ms = (uint32_t)ceilf((SETTLING_SIGNAL_PERIODS / data->current_freq) * 1000.0f);
-		if (settle_time_ms < 2U) {
-			settle_time_ms = 2U;
-		}
-		HAL_Delay(settle_time_ms);
+		HAL_Delay(StepSweep_SettleTimeMs(data->current_freq));
 
 		float32_t gain_samples[SWEEP_CAPTURE_REPEATS];
 		float32_t input_rms_samples[SWEEP_CAPTURE_REPEATS];
@@ -959,17 +1144,13 @@ void Sweep_ExecuteStepSweep(
 		uint16_t output_max_code = 0U;
 		uint32_t valid_captures = 0U;
 		uint16_t clip_flags_or = 0U;
-		uint32_t capture_time_ms = (uint32_t)ceilf(
-			((float32_t)config->adc_buffersize / data->adc_actual_sample_rate) * 1000.0f
-		) + ADC_CAPTURE_GUARD_MS;
+		uint32_t capture_time_ms = StepSweep_CaptureTimeoutMs(config, data);
 		uint32_t repeat = 0U;
 		HAL_StatusTypeDef adc1_status;
 		HAL_StatusTypeDef adc2_status;
-		bool capture_complete = false;
+		StepSweepCaptureStatus_t capture_status = STEP_CAPTURE_TIMEOUT;
 		bool phase_committed = false;
-		if (capture_time_ms < 5U) {
-			capture_time_ms = 5U;
-		}
+		float32_t phase_samples[SWEEP_CAPTURE_REPEATS];
 
 		for (repeat = 0U; repeat < SWEEP_CAPTURE_REPEATS; repeat++) {
 			adc1_flag = false;
@@ -979,20 +1160,27 @@ void Sweep_ExecuteStepSweep(
 			__HAL_TIM_SET_COUNTER(&htim1, 0);
 			adc1_status = HAL_ADC_Start_DMA(&hadc1, (uint32_t*)data->adc1_buffer, config->adc_buffersize);
 			adc2_status = HAL_ADC_Start_DMA(&hadc2, (uint32_t*)data->adc2_buffer, config->adc_buffersize);
-			capture_complete = false;
+			capture_status = STEP_CAPTURE_TIMEOUT;
 
 			if (adc1_status == HAL_OK && adc2_status == HAL_OK) {
 				HAL_TIM_Base_Start(&htim1);
-				capture_complete = StepSweep_WaitForAdcCapture(capture_time_ms);
+				capture_status = StepSweep_WaitForAdcCapture(capture_time_ms);
 			}
 
 			HAL_TIM_Base_Stop(&htim1);
 			HAL_ADC_Stop_DMA(&hadc1);
 			HAL_ADC_Stop_DMA(&hadc2);
 
-			if (adc1_status == HAL_OK && adc2_status == HAL_OK && capture_complete) {
+			if (capture_status == STEP_CAPTURE_STOPPED) {
+				StepSweep_StopPeripherals();
+				printf("STOPPED %u/%u\r\n", (unsigned int)i, (unsigned int)steps);
+				return SWEEP_RUN_STOPPED;
+			}
+
+			if (adc1_status == HAL_OK && adc2_status == HAL_OK && capture_status == STEP_CAPTURE_DONE) {
 				wave_analys(data);
 				gain_samples[valid_captures] = data->gain;
+				phase_samples[valid_captures] = data_phase.phase_unwrapped;
 				if (!phase_committed) {
 					PhaseMilliRad[i] = FloatRadToMilliI16(data_phase.phase_unwrapped);
 					phase_committed = true;
@@ -1029,17 +1217,30 @@ void Sweep_ExecuteStepSweep(
 		HAL_DAC_Stop_DMA(&hdac1, DAC_CHANNEL_1);
 
 		if (valid_captures == 0U) {
-			PhaseMilliRad[i] = 0;
-			GainQ15[i] = 0U;
-			InputRmsMv[i] = 0U;
-			OutputRmsMv[i] = 0U;
-			InputDcMv[i] = 0U;
-			OutputDcMv[i] = 0U;
-			InputPpMv[i] = 0U;
-			OutputPpMv[i] = 0U;
-			ClipFlags[i] = 0U;
-			ValidCaptureCount[i] = 0U;
+			StepSweep_ClearPointResult(i);
 		} else {
+			float32_t gain_min = gain_samples[0];
+			float32_t gain_max = gain_samples[0];
+			float32_t phase_min = phase_samples[0];
+			float32_t phase_max = phase_samples[0];
+			for (uint32_t span_i = 1U; span_i < valid_captures; span_i++) {
+				if (gain_samples[span_i] < gain_min) {
+					gain_min = gain_samples[span_i];
+				}
+				if (gain_samples[span_i] > gain_max) {
+					gain_max = gain_samples[span_i];
+				}
+				if (phase_samples[span_i] < phase_min) {
+					phase_min = phase_samples[span_i];
+				}
+				if (phase_samples[span_i] > phase_max) {
+					phase_max = phase_samples[span_i];
+				}
+			}
+			float32_t gain_span_db = 0.0f;
+			if (gain_min > 1.0e-9f && gain_max > 1.0e-9f) {
+				gain_span_db = 20.0f * log10f(gain_max / gain_min);
+			}
 			GainQ15[i] = FloatToQ15(MedianFloat32(gain_samples, valid_captures));
 			InputRmsMv[i] = FloatToScaledU16(MedianFloat32(input_rms_samples, valid_captures), 1000.0f);
 			OutputRmsMv[i] = FloatToScaledU16(MedianFloat32(output_rms_samples, valid_captures), 1000.0f);
@@ -1049,32 +1250,40 @@ void Sweep_ExecuteStepSweep(
 			OutputPpMv[i] = FloatToScaledU16(MedianFloat32(output_pp_samples, valid_captures), 1000.0f);
 			ClipFlags[i] = clip_flags_or;
 			ValidCaptureCount[i] = (uint16_t)valid_captures;
-			if (input_min_code < input_min_code_all) {
-				input_min_code_all = input_min_code;
-			}
-			if (input_max_code > input_max_code_all) {
-				input_max_code_all = input_max_code;
-			}
-			if (output_min_code < output_min_code_all) {
-				output_min_code_all = output_min_code;
-			}
-			if (output_max_code > output_max_code_all) {
-				output_max_code_all = output_max_code;
-			}
-			if ((clip_flags_or & 0x01U) != 0U) {
-				input_clip_points++;
-			}
-			if ((clip_flags_or & 0x02U) != 0U) {
-				output_clip_points++;
-			}
+			ActualFreqMilliHz[i] = FloatToScaledU32(data->actual_freq, 1000.0f);
+			AdcSampleRateMilliHz[i] = FloatToScaledU32(data->adc_actual_sample_rate, 1000.0f);
+			DacSampleRateMilliHz[i] = FloatToScaledU32(data->dac_actual_sample_rate, 1000.0f);
+			MagnitudeRepeatSpanMilliDb[i] = FloatToScaledU16(gain_span_db, 1000.0f);
+			PhaseRepeatSpanMilliRad[i] = FloatToScaledU16(fabsf(phase_max - phase_min), 1000.0f);
+			InputMinCode[i] = input_min_code;
+			InputMaxCode[i] = input_max_code;
+			OutputMinCode[i] = output_min_code;
+			OutputMaxCode[i] = output_max_code;
+			SweepOutputSummary_AddPoint(
+				&output_summary,
+				input_min_code,
+				input_max_code,
+				output_min_code,
+				output_max_code,
+				clip_flags_or);
 		}
 
+		printf("PROGRESS %u/%u %.3f\r\n", (unsigned int)(i + 1U), (unsigned int)steps, data->actual_freq);
 		f_target += config->f_step;
 	}
 
 	UART_PrintScaledU32Array("omega", OmegaMilliRadPerSec, steps, 1000.0f);
 	UART_PrintQ15Array("Magnitude_data", GainQ15, steps);
 	UART_PrintMilliRadArray("Phase_data_rad", PhaseMilliRad, steps);
+	UART_PrintScaledU32Array("Actual_freq_hz", ActualFreqMilliHz, steps, 1000.0f);
+	UART_PrintScaledU32Array("Adc_sample_rate_hz", AdcSampleRateMilliHz, steps, 1000.0f);
+	UART_PrintScaledU32Array("Dac_sample_rate_hz", DacSampleRateMilliHz, steps, 1000.0f);
+	UART_PrintScaledU16Array("Magnitude_repeat_span_db", MagnitudeRepeatSpanMilliDb, steps, 1000.0f);
+	UART_PrintScaledU16Array("Phase_repeat_span_rad", PhaseRepeatSpanMilliRad, steps, 1000.0f);
+	UART_PrintU16Array("Input_min_code", InputMinCode, steps);
+	UART_PrintU16Array("Input_max_code", InputMaxCode, steps);
+	UART_PrintU16Array("Output_min_code", OutputMinCode, steps);
+	UART_PrintU16Array("Output_max_code", OutputMaxCode, steps);
 	UART_PrintScaledU16Array("Input_rms_v", InputRmsMv, steps, 1000.0f);
 	UART_PrintScaledU16Array("Output_rms_v", OutputRmsMv, steps, 1000.0f);
 	UART_PrintScaledU16Array("Input_dc_v", InputDcMv, steps, 1000.0f);
@@ -1084,13 +1293,14 @@ void Sweep_ExecuteStepSweep(
 	UART_PrintScaledU16Array("Input_pp_v", InputPpMv, steps, 1000.0f);
 	UART_PrintScaledU16Array("Output_pp_v", OutputPpMv, steps, 1000.0f);
 	printf("Adc_code_range=[%u,%u,%u,%u]\r\n",
-		(unsigned int)input_min_code_all,
-		(unsigned int)input_max_code_all,
-		(unsigned int)output_min_code_all,
-		(unsigned int)output_max_code_all);
+		(unsigned int)output_summary.input_min_code_all,
+		(unsigned int)output_summary.input_max_code_all,
+		(unsigned int)output_summary.output_min_code_all,
+		(unsigned int)output_summary.output_max_code_all);
 	printf("Clip_point_count=[%u,%u]\r\n",
-		(unsigned int)input_clip_points,
-		(unsigned int)output_clip_points);
+		(unsigned int)output_summary.input_clip_points,
+		(unsigned int)output_summary.output_clip_points);
+	return SWEEP_RUN_DONE;
 }
 
 

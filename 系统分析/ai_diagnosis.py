@@ -38,6 +38,12 @@ DEFAULT_KB_PATH = Path(__file__).with_name("diagnosis_knowledge_base.json")
 NOISE_FLOOR_RMS_V = 0.004
 LOW_INPUT_RMS_V = 0.03
 ADC_BIAS_CENTER_V = 1.65
+MAX_STANDARD_SIMPLE_ORDER = 3
+LOW_HIGH_MODEL_SHAPES = ("butterworth", "cascade")
+LOW_HIGH_SHAPE_LABELS = {
+    "butterworth": "Butterworth幅频模板",
+    "cascade": "多级一阶级联模板",
+}
 
 
 @dataclass(frozen=True)
@@ -85,9 +91,11 @@ class EquivalentTransferFunction:
 class TransferModelFit:
     model_family: str
     order: int
+    model_shape: str
     parameters: dict[str, float]
     r_squared: float
     rmse_db: float
+    max_residual_db: float
     residual_summary: str
     evidence: str
     success: bool = True
@@ -143,6 +151,7 @@ class IntelligentDiagnosis:
     left_cutoff_hz: float | None
     right_cutoff_hz: float | None
     confidence: float
+    measurement_health: str = ""
     measurement_quality: list[str] = field(default_factory=list)
     possible_faults: list[str] = field(default_factory=list)
     next_test_suggestions: list[str] = field(default_factory=list)
@@ -278,11 +287,20 @@ def _find_crossings(freq_hz: np.ndarray, values_db: np.ndarray, target_db: float
     return crossings
 
 
-def _order_from_slope(slope_db_dec: float) -> int:
+def _order_from_slope(slope_db_dec: float, max_order: int = MAX_STANDARD_SIMPLE_ORDER) -> int:
     if not np.isfinite(slope_db_dec):
         return 1
     order = int(round(abs(float(slope_db_dec)) / 20.0))
-    return int(np.clip(order, 1, 6))
+    return int(np.clip(order, 1, max_order))
+
+
+def _cap_standard_order(circuit_type: str | None, order: int) -> int:
+    order = int(np.clip(int(order or 1), 1, 12))
+    if circuit_type in ("lowpass", "highpass"):
+        return int(np.clip(order, 1, MAX_STANDARD_SIMPLE_ORDER))
+    if circuit_type in ("bandpass", "bandstop"):
+        return max(2, order)
+    return order
 
 
 def _nice_step_hz(raw_step: float) -> float:
@@ -468,7 +486,7 @@ def _classify_from_features(features: DiagnosisFeatures) -> tuple[str, int, floa
         )
         confidence = 0.55 + min(features.peak_margin_db / 24.0, 0.30)
         confidence += min(abs(features.head_slope_db_dec) + abs(features.tail_slope_db_dec), 80.0) / 400.0
-        return "bandpass", int(np.clip(order, 1, 6)), float(np.clip(confidence, 0.0, 0.98))
+        return "bandpass", int(np.clip(order, 2, 6)), float(np.clip(confidence, 0.0, 0.98))
 
     if notch_interior and features.notch_margin_db >= 3.0:
         order = 2
@@ -478,13 +496,13 @@ def _classify_from_features(features: DiagnosisFeatures) -> tuple[str, int, floa
         return "bandstop", order, float(np.clip(confidence, 0.0, 0.98))
 
     if low_to_high_db >= 6.0 or (low_to_high_db >= 3.0 and features.tail_slope_db_dec < -8.0):
-        order = _order_from_slope(features.tail_slope_db_dec)
+        order = _order_from_slope(features.tail_slope_db_dec, max_order=MAX_STANDARD_SIMPLE_ORDER)
         confidence = 0.58 + min(low_to_high_db / 55.0, 0.28)
         confidence += min(abs(features.tail_slope_db_dec), 80.0) / 500.0
         return "lowpass", order, float(np.clip(confidence, 0.0, 0.98))
 
     if high_to_low_db >= 6.0 or (high_to_low_db >= 3.0 and features.head_slope_db_dec > 8.0):
-        order = _order_from_slope(features.head_slope_db_dec)
+        order = _order_from_slope(features.head_slope_db_dec, max_order=MAX_STANDARD_SIMPLE_ORDER)
         confidence = 0.58 + min(high_to_low_db / 55.0, 0.28)
         confidence += min(abs(features.head_slope_db_dec), 80.0) / 500.0
         return "highpass", order, float(np.clip(confidence, 0.0, 0.98))
@@ -492,16 +510,26 @@ def _classify_from_features(features: DiagnosisFeatures) -> tuple[str, int, floa
     return "unknown", 1, 0.30
 
 
-def _model_db_response(family: str, order: int, freq_hz: np.ndarray, params: np.ndarray) -> np.ndarray:
+def _model_db_response(
+    family: str,
+    order: int,
+    freq_hz: np.ndarray,
+    params: np.ndarray,
+    model_shape: str = "butterworth",
+) -> np.ndarray:
     gain_db = params[0]
     freq_hz = np.clip(freq_hz, 1.0e-12, None)
     if family == "lowpass":
         fc = max(float(params[1]), 1.0e-9)
         ratio = freq_hz / fc
+        if model_shape == "cascade":
+            return gain_db - 10.0 * order * np.log10(1.0 + ratio**2)
         return gain_db - 10.0 * np.log10(1.0 + ratio ** (2 * order))
     if family == "highpass":
         fc = max(float(params[1]), 1.0e-9)
         ratio = fc / freq_hz
+        if model_shape == "cascade":
+            return gain_db - 10.0 * order * np.log10(1.0 + ratio**2)
         return gain_db - 10.0 * np.log10(1.0 + ratio ** (2 * order))
     if family == "bandpass":
         f0 = max(float(params[1]), 1.0e-9)
@@ -560,7 +588,12 @@ def _format_polynomial(coefficients: list[float]) -> str:
     return " ".join(terms) if terms else "0"
 
 
-def _low_high_denominator(order: int, wc: float) -> list[float]:
+def _low_high_denominator(order: int, wc: float, model_shape: str = "butterworth") -> list[float]:
+    if model_shape == "cascade":
+        denominator = [1.0]
+        for _ in range(max(1, int(order))):
+            denominator = _poly_mul(denominator, [1.0, wc])
+        return denominator
     if order == 1:
         return [1.0, wc]
     if order == 2:
@@ -575,24 +608,60 @@ def _low_high_denominator(order: int, wc: float) -> list[float]:
     return denominator
 
 
+def _low_high_effective_cutoff_hz(family: str, order: int, pole_fc_hz: float, model_shape: str) -> float:
+    pole_fc_hz = float(pole_fc_hz)
+    if model_shape != "cascade" or order <= 1:
+        return pole_fc_hz
+    ratio = math.sqrt(max(2.0 ** (1.0 / float(order)) - 1.0, 1.0e-12))
+    if family == "lowpass":
+        return pole_fc_hz * ratio
+    if family == "highpass":
+        return pole_fc_hz / ratio
+    return pole_fc_hz
+
+
+def _low_high_pole_cutoff_hz(family: str, order: int, effective_fc_hz: float, model_shape: str) -> float:
+    effective_fc_hz = float(effective_fc_hz)
+    if model_shape != "cascade" or order <= 1:
+        return effective_fc_hz
+    ratio = math.sqrt(max(2.0 ** (1.0 / float(order)) - 1.0, 1.0e-12))
+    if family == "lowpass":
+        return effective_fc_hz / ratio
+    if family == "highpass":
+        return effective_fc_hz * ratio
+    return effective_fc_hz
+
+
 def build_equivalent_transfer_function(fit: TransferModelFit) -> EquivalentTransferFunction | None:
     family = fit.model_family
     order = int(fit.order)
+    model_shape = fit.model_shape
     gain_db = float(fit.parameters.get("gain_db", 0.0))
     gain = float(10.0 ** (gain_db / 20.0))
 
     if family in ("lowpass", "highpass"):
-        fc_hz = fit.parameters.get("fc_hz")
-        if fc_hz is None or fc_hz <= 0.0:
+        pole_fc_hz = fit.parameters.get("pole_fc_hz", fit.parameters.get("fc_hz"))
+        if pole_fc_hz is None or pole_fc_hz <= 0.0:
             return None
-        wc = 2.0 * math.pi * float(fc_hz)
-        denominator = _low_high_denominator(order, wc)
+        fc_hz = fit.parameters.get("fc_hz", pole_fc_hz)
+        wc = 2.0 * math.pi * float(pole_fc_hz)
+        denominator = _low_high_denominator(order, wc, model_shape)
+        shape_label = LOW_HIGH_SHAPE_LABELS.get(model_shape, model_shape)
         if family == "lowpass":
             numerator = [gain * wc**order]
-            summary = f"K={_format_coeff(gain)}, fc={fc_hz:.3g} Hz, wc={_format_coeff(wc)} rad/s"
         else:
             numerator = [gain] + [0.0] * order
-            summary = f"K={_format_coeff(gain)}, fc={fc_hz:.3g} Hz, wc={_format_coeff(wc)} rad/s"
+        if math.isclose(float(fc_hz), float(pole_fc_hz), rel_tol=1.0e-6, abs_tol=1.0e-9):
+            summary = (
+                f"K={_format_coeff(gain)}, 模板={shape_label}, "
+                f"fc={float(fc_hz):.3g} Hz, wc={_format_coeff(wc)} rad/s"
+            )
+        else:
+            summary = (
+                f"K={_format_coeff(gain)}, 模板={shape_label}, "
+                f"fc(-3dB)={float(fc_hz):.3g} Hz, pole_fc={float(pole_fc_hz):.3g} Hz, "
+                f"wc={_format_coeff(wc)} rad/s"
+            )
         expression = f"H(s) = ({_format_polynomial(numerator)}) / ({_format_polynomial(denominator)})"
         return EquivalentTransferFunction(
             model_family=family,
@@ -650,6 +719,40 @@ def _fit_metrics(measured_db: np.ndarray, fitted_db: np.ndarray) -> tuple[float,
     return float(np.clip(r_squared, -1.0, 1.0)), rmse_db, residual
 
 
+def transfer_fit_reliability_text(fit: TransferModelFit | None) -> str:
+    if fit is None:
+        return ""
+
+    issues: list[str] = []
+    if fit.r_squared < 0.90:
+        issues.append(f"R2={fit.r_squared:.3f}<0.90")
+    if fit.rmse_db > 2.0:
+        issues.append(f"RMSE={fit.rmse_db:.2f} dB>2 dB")
+    if fit.max_residual_db > 15.0:
+        issues.append(f"最大残差={fit.max_residual_db:.2f} dB>15 dB")
+    if issues:
+        return (
+            "低：拟合偏差较大（" + "、".join(issues) + "），"
+            "当前传函只表示最接近的等效模型，不建议直接作为最终传函；"
+            "建议补扫截止附近并检查异常频点。"
+        )
+
+    cautions: list[str] = []
+    if fit.r_squared < 0.95:
+        cautions.append(f"R2={fit.r_squared:.3f}")
+    if fit.rmse_db > 1.0:
+        cautions.append(f"RMSE={fit.rmse_db:.2f} dB")
+    if fit.max_residual_db > 8.0:
+        cautions.append(f"最大残差={fit.max_residual_db:.2f} dB")
+    if cautions:
+        return (
+            "中：模板基本可参考，但仍有偏差（" + "、".join(cautions) + "），"
+            "建议结合传统分析和补扫结果确认。"
+        )
+
+    return "高：模板与扫频数据吻合较好，可作为等效传函参考。"
+
+
 def _build_transfer_fit(
     family: str,
     order: int,
@@ -657,13 +760,25 @@ def _build_transfer_fit(
     freq_hz: np.ndarray,
     measured_db: np.ndarray,
     success: bool = True,
+    model_shape: str = "butterworth",
 ) -> TransferModelFit:
-    fitted_db = _model_db_response(family, order, freq_hz, params)
+    fitted_db = _model_db_response(family, order, freq_hz, params, model_shape)
     r_squared, rmse_db, residual = _fit_metrics(measured_db, fitted_db)
+    max_residual_db = float(np.max(np.abs(residual)))
     parameters = {"gain_db": float(params[0])}
     if family in ("lowpass", "highpass"):
-        parameters["fc_hz"] = float(params[1])
-        evidence = f"{CIRCUIT_TYPE_LABELS[family]}{order}阶模板: fc={params[1]:.1f} Hz, R2={r_squared:.3f}"
+        pole_fc_hz = float(params[1])
+        fc_hz = _low_high_effective_cutoff_hz(family, order, pole_fc_hz, model_shape)
+        parameters["fc_hz"] = float(fc_hz)
+        parameters["pole_fc_hz"] = pole_fc_hz
+        shape_label = LOW_HIGH_SHAPE_LABELS.get(model_shape, model_shape)
+        if math.isclose(fc_hz, pole_fc_hz, rel_tol=1.0e-6, abs_tol=1.0e-9):
+            evidence = f"{CIRCUIT_TYPE_LABELS[family]}{order}阶{shape_label}: fc={fc_hz:.1f} Hz, R2={r_squared:.3f}"
+        else:
+            evidence = (
+                f"{CIRCUIT_TYPE_LABELS[family]}{order}阶{shape_label}: "
+                f"fc(-3dB)={fc_hz:.1f} Hz, pole_fc={pole_fc_hz:.1f} Hz, R2={r_squared:.3f}"
+            )
     else:
         parameters["f0_hz"] = float(params[1])
         parameters["q"] = float(params[2])
@@ -675,13 +790,15 @@ def _build_transfer_fit(
             f"Q={params[2]:.2f}, R2={r_squared:.3f}"
         )
 
-    residual_summary = f"RMSE={rmse_db:.2f} dB, 最大残差={float(np.max(np.abs(residual))):.2f} dB"
+    residual_summary = f"RMSE={rmse_db:.2f} dB, 最大残差={max_residual_db:.2f} dB"
     fit = TransferModelFit(
         model_family=family,
         order=int(order),
+        model_shape=model_shape,
         parameters=parameters,
         r_squared=r_squared,
         rmse_db=rmse_db,
+        max_residual_db=max_residual_db,
         residual_summary=residual_summary,
         evidence=evidence,
         success=success,
@@ -689,9 +806,11 @@ def _build_transfer_fit(
     return TransferModelFit(
         model_family=fit.model_family,
         order=fit.order,
+        model_shape=fit.model_shape,
         parameters=fit.parameters,
         r_squared=fit.r_squared,
         rmse_db=fit.rmse_db,
+        max_residual_db=fit.max_residual_db,
         residual_summary=fit.residual_summary,
         evidence=fit.evidence,
         success=fit.success,
@@ -735,6 +854,7 @@ def _grid_fit_one_model(
     freq_hz: np.ndarray,
     measured_db: np.ndarray,
     features: DiagnosisFeatures,
+    model_shape: str = "butterworth",
 ) -> TransferModelFit | None:
     if len(freq_hz) < 8:
         return None
@@ -752,14 +872,22 @@ def _grid_fit_one_model(
         for fc_hz in fc_candidates:
             if not np.isfinite(fc_hz) or fc_hz <= 0.0:
                 continue
-            shape = _model_db_response(family, order, freq_hz, np.array([0.0, fc_hz], dtype=float))
+            shape = _model_db_response(family, order, freq_hz, np.array([0.0, fc_hz], dtype=float), model_shape)
             gain_db, rmse_db = _best_gain_for_shape(measured_db, shape)
             params = np.array([gain_db, fc_hz], dtype=float)
             if best is None or rmse_db < best[0]:
                 best = (rmse_db, params)
         if best is None:
             return None
-        return _build_transfer_fit(family, order, best[1], freq_hz, measured_db, success=True)
+        for span, count in ((1.22, 35), (1.07, 35), (1.018, 31)):
+            center_fc = float(best[1][1])
+            for fc_hz in _log_grid(center_fc / span, center_fc * span, count):
+                shape = _model_db_response(family, order, freq_hz, np.array([0.0, fc_hz], dtype=float), model_shape)
+                gain_db, rmse_db = _best_gain_for_shape(measured_db, shape)
+                params = np.array([gain_db, fc_hz], dtype=float)
+                if rmse_db < best[0]:
+                    best = (rmse_db, params)
+        return _build_transfer_fit(family, order, best[1], freq_hz, measured_db, success=True, model_shape=model_shape)
 
     if family in ("bandpass", "bandstop"):
         center_guess = features.peak_freq_hz if family == "bandpass" else features.notch_freq_hz
@@ -820,7 +948,7 @@ def _grid_fit_one_model(
             best = search_band(fine_f0_candidates, fine_q_candidates, fine_floor_candidates, best)
         if best is None:
             return None
-        return _build_transfer_fit(family, order, best[1], freq_hz, measured_db, success=True)
+        return _build_transfer_fit(family, order, best[1], freq_hz, measured_db, success=True, model_shape=model_shape)
 
     return None
 
@@ -831,6 +959,7 @@ def _fit_one_model(
     freq_hz: np.ndarray,
     measured_db: np.ndarray,
     features: DiagnosisFeatures,
+    model_shape: str = "butterworth",
 ) -> TransferModelFit | None:
     if len(freq_hz) < 8:
         return None
@@ -842,19 +971,20 @@ def _fit_one_model(
     measured_db = measured_db[finite]
 
     gain_guess = float(np.nanmax(measured_db))
-    fc_guess = float(np.clip(features.peak_freq_hz, features.freq_min_hz, features.freq_max_hz))
     if family == "lowpass":
         gain_guess = features.low_gain_db
-        fc_guess = max(features.freq_min_hz, min(features.freq_max_hz, features.peak_freq_hz or np.median(freq_hz)))
-        x0 = np.array([gain_guess, max(fc_guess, np.median(freq_hz))], dtype=float)
+        effective_fc_guess = _initial_cutoff_guess(family, features, freq_hz, measured_db)
+        pole_fc_guess = _low_high_pole_cutoff_hz(family, order, effective_fc_guess, model_shape)
         lower = np.array([features.min_gain_db - 20.0, max(features.freq_min_hz * 0.05, 0.1)])
         upper = np.array([features.max_gain_db + 20.0, features.freq_max_hz * 20.0])
+        x0 = np.array([gain_guess, float(np.clip(pole_fc_guess, lower[1], upper[1]))], dtype=float)
     elif family == "highpass":
         gain_guess = features.high_gain_db
-        fc_guess = max(features.freq_min_hz, min(features.freq_max_hz, features.peak_freq_hz or np.median(freq_hz)))
-        x0 = np.array([gain_guess, max(fc_guess, np.median(freq_hz))], dtype=float)
+        effective_fc_guess = _initial_cutoff_guess(family, features, freq_hz, measured_db)
+        pole_fc_guess = _low_high_pole_cutoff_hz(family, order, effective_fc_guess, model_shape)
         lower = np.array([features.min_gain_db - 20.0, max(features.freq_min_hz * 0.05, 0.1)])
         upper = np.array([features.max_gain_db + 20.0, features.freq_max_hz * 20.0])
+        x0 = np.array([gain_guess, float(np.clip(pole_fc_guess, lower[1], upper[1]))], dtype=float)
     elif family == "bandpass":
         f0_guess = max(features.peak_freq_hz, np.median(freq_hz))
         x0 = np.array([gain_guess, f0_guess, 1.0], dtype=float)
@@ -871,19 +1001,23 @@ def _fit_one_model(
         return None
 
     if not HAS_SCIPY_OPTIMIZE:
-        return _grid_fit_one_model(family, order, freq_hz, measured_db, features)
+        return _grid_fit_one_model(family, order, freq_hz, measured_db, features, model_shape)
 
     try:
         result = least_squares(
-            lambda p: _model_db_response(family, order, freq_hz, p) - measured_db,
+            lambda p: _model_db_response(family, order, freq_hz, p, model_shape) - measured_db,
             x0=np.clip(x0, lower, upper),
             bounds=(lower, upper),
-            max_nfev=500,
+            x_scale=np.maximum(np.abs(x0), 1.0),
+            ftol=1.0e-12,
+            xtol=1.0e-12,
+            gtol=1.0e-12,
+            max_nfev=1000,
         )
     except Exception:
-        return _grid_fit_one_model(family, order, freq_hz, measured_db, features)
+        return _grid_fit_one_model(family, order, freq_hz, measured_db, features, model_shape)
 
-    return _build_transfer_fit(family, order, result.x, freq_hz, measured_db, success=bool(result.success))
+    return _build_transfer_fit(family, order, result.x, freq_hz, measured_db, success=bool(result.success), model_shape=model_shape)
 
 
 def fit_transfer_templates(omega, magnitude, phase_rad=None) -> list[TransferModelFit]:
@@ -901,9 +1035,15 @@ def fit_transfer_templates(omega, magnitude, phase_rad=None) -> list[TransferMod
     fits: list[TransferModelFit] = []
     for family in ("lowpass", "highpass"):
         for order in (1, 2, 3):
-            fit = _fit_one_model(family, order, freq_hz, measured_db, features)
-            if fit is not None:
-                fits.append(fit)
+            shape_fits: list[TransferModelFit] = []
+            shapes = ("butterworth",) if order == 1 else LOW_HIGH_MODEL_SHAPES
+            for model_shape in shapes:
+                fit = _fit_one_model(family, order, freq_hz, measured_db, features, model_shape=model_shape)
+                if fit is not None:
+                    shape_fits.append(fit)
+            if shape_fits:
+                shape_fits.sort(key=lambda item: (item.rmse_db, -item.r_squared))
+                fits.append(shape_fits[0])
     for family in ("bandpass", "bandstop"):
         fit = _fit_one_model(family, 2, freq_hz, measured_db, features)
         if fit is not None:
@@ -942,25 +1082,54 @@ def _analysis_result_state(analysis_result: Any | None) -> tuple[str | None, int
     result_type = getattr(analysis_result, "filter_type", None)
     if result_type in ("other", "unknown", ""):
         result_type = "unknown"
-    result_order = int(getattr(analysis_result, "order_estimate", 0) or 0)
+    raw_order = int(getattr(analysis_result, "order_estimate", 0) or 0)
+    result_order = _cap_standard_order(result_type, raw_order)
     result_conf = float(getattr(analysis_result, "identification_confidence", 0.0) or 0.0)
     order_reliable = bool(getattr(analysis_result, "order_reliable", False))
+    over_standard_order = raw_order != result_order and result_type in ("lowpass", "highpass")
     anchor_reliable = (
         result_type in ("lowpass", "highpass", "bandpass", "bandstop")
         and result_order > 0
         and order_reliable
+        and not over_standard_order
         and result_conf >= 0.75
     )
     return result_type, result_order, result_conf, anchor_reliable
 
 
-def _decision_strategy_text(analysis_result: Any | None) -> str:
+def _decision_strategy_text(analysis_result: Any | None, features: DiagnosisFeatures | None = None) -> str:
     result_type, result_order, result_conf, anchor_reliable = _analysis_result_state(analysis_result)
+    raw_order = int(getattr(analysis_result, "order_estimate", 0) or 0) if analysis_result is not None else 0
+    feature_type = None
+    if features is not None:
+        feature_type, _, _ = _classify_from_features(features)
+    if (
+        analysis_result is not None
+        and result_type in ("lowpass", "highpass")
+        and raw_order > MAX_STANDARD_SIMPLE_ORDER
+    ):
+        label = _system_label(result_type or "unknown", result_order)
+        return (
+            f"项目标准边界保护：传统分析曾给出 {raw_order} 阶"
+            f"{CIRCUIT_TYPE_LABELS.get(result_type, '')}，但内置标准低/高通最高按三阶验收；"
+            f"AI按{label}参与候选排序，并把更高阶视为补扫局部斜率、寄生或噪声提示。"
+        )
     if anchor_reliable:
         label = _system_label(result_type or "unknown", result_order)
         return (
             f"传统频响分析为主判据：filter_analysis 已可靠判定为{label}"
             f"（置信度 {result_conf:.2f}），AI用于传递函数拟合、故障证据链和主动补扫建议。"
+        )
+    if (
+        result_type in ("lowpass", "highpass", "bandpass", "bandstop")
+        and feature_type == result_type
+        and result_conf >= 0.90
+    ):
+        label = _system_label(result_type or "unknown", result_order)
+        return (
+            f"传统高置信锚定：filter_analysis 已判定为{label}"
+            f"（置信度 {result_conf:.2f}），且AI特征同意滤波器族；"
+            "AI只补充候选解释，不降阶覆盖传统结果。"
         )
     if analysis_result is not None:
         return (
@@ -989,6 +1158,14 @@ def rank_diagnosis_candidates(
     ]
     by_combo = {(fit.model_family, fit.order): fit for fit in model_fits}
     result_type, result_order, result_conf, analysis_anchor_reliable = _analysis_result_state(analysis_result)
+    feature_type, _, _ = _classify_from_features(features)
+    high_conf_family_anchor = (
+        result_type in ("lowpass", "highpass", "bandpass", "bandstop")
+        and result_order > 0
+        and result_conf >= 0.90
+        and feature_type == result_type
+    )
+    effective_analysis_anchor = analysis_anchor_reliable or high_conf_family_anchor
     if (
         result_type in ("lowpass", "highpass", "bandpass", "bandstop")
         and result_order > 0
@@ -1013,7 +1190,7 @@ def rank_diagnosis_candidates(
 
         if circuit_type == "unknown":
             confidence = max(0.05, 0.55 * feature_score + 0.45 * analysis_score)
-        elif analysis_anchor_reliable:
+        elif effective_analysis_anchor:
             confidence = 0.20 * feature_score + 0.20 * model_score + 0.60 * analysis_score
             if circuit_type == result_type and order == result_order:
                 confidence = max(confidence, min(0.97, 0.78 + 0.20 * result_conf))
@@ -1040,6 +1217,8 @@ def rank_diagnosis_candidates(
         ]
         if analysis_anchor_reliable:
             evidence_parts.append("传统可靠锚定")
+        elif high_conf_family_anchor:
+            evidence_parts.append("传统高置信族锚定")
         if fit is not None:
             evidence_parts.append(f"R2={fit.r_squared:.3f}")
         candidates.append(
@@ -1281,6 +1460,43 @@ def _quality_summary(features: DiagnosisFeatures, circuit_type: str) -> list[str
     return quality
 
 
+def _measurement_health_summary(
+    features: DiagnosisFeatures,
+    confidence: float,
+    fault_findings: list[FaultFinding],
+    needs_resweep: bool,
+) -> str:
+    score = 100
+    for finding in fault_findings:
+        if finding.severity == "critical":
+            score -= 28
+        elif finding.severity == "warning":
+            score -= 16
+        else:
+            score -= 7
+    if features.point_count < 12:
+        score -= 18
+    if features.sweep_range_decades < 1.2:
+        score -= 12
+    if needs_resweep:
+        score -= 10
+    if confidence < 0.55:
+        score -= 18
+    elif confidence < 0.75:
+        score -= 9
+    score = int(np.clip(score, 0, 100))
+
+    if score >= 85:
+        label = "A 可直接验收"
+    elif score >= 70:
+        label = "B 建议补扫确认"
+    elif score >= 50:
+        label = "C 先复测再报告"
+    else:
+        label = "D 先修正测量链"
+    return f"{label}（{score}/100）"
+
+
 def run_intelligent_diagnosis(
     omega,
     magnitude,
@@ -1292,7 +1508,7 @@ def run_intelligent_diagnosis(
     model_fits = fit_transfer_templates(omega, magnitude, phase_rad)
     candidates = rank_diagnosis_candidates(features, model_fits, analysis_result, diagnostics)
     best_candidate = candidates[0] if candidates else DiagnosisCandidate("unknown", 1, 0.20, None, "无有效候选")
-    decision_strategy = _decision_strategy_text(analysis_result)
+    decision_strategy = _decision_strategy_text(analysis_result, features)
 
     circuit_type = best_candidate.circuit_type
     order_estimate = best_candidate.order_estimate
@@ -1333,6 +1549,7 @@ def run_intelligent_diagnosis(
         left_cutoff_hz=left_hz,
         right_cutoff_hz=right_hz,
         confidence=confidence,
+        measurement_health=_measurement_health_summary(features, confidence, fault_findings, needs_resweep),
         measurement_quality=_quality_summary(features, circuit_type),
         possible_faults=possible_faults,
         next_test_suggestions=suggestions,
@@ -1396,6 +1613,9 @@ def format_ai_diagnosis_report_lines(diagnosis: IntelligentDiagnosis) -> list[st
             f"模型拟合: {fit.evidence}；{fit.residual_summary}；"
             f"参数={{{', '.join(f'{k}={v:.3g}' for k, v in fit.parameters.items())}}}"
         )
+        reliability_text = transfer_fit_reliability_text(fit)
+        if reliability_text:
+            lines.append(f"传函可信度: {reliability_text}")
         if diagnosis.equivalent_transfer_function is not None:
             tf = diagnosis.equivalent_transfer_function
             lines.append(
@@ -1410,6 +1630,7 @@ def format_ai_diagnosis_report_lines(diagnosis: IntelligentDiagnosis) -> list[st
 
     lines.extend(
         [
+            "测量健康: " + (diagnosis.measurement_health or "暂无"),
             "测量质量: " + "；".join(diagnosis.measurement_quality),
             "故障证据链: "
             + (

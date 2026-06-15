@@ -26,6 +26,7 @@ MIN_RELIABLE_DECADES_SIMPLE = 1.20
 MIN_RELIABLE_DECADES_BAND = 1.50
 MIN_EDGE_DECADES = 0.25
 MIN_ORDER_SPAN_DB = 6.0
+MAX_STANDARD_SIMPLE_FILTER_ORDER = 3
 COMPACT_DIAGNOSTIC_KEYS = {'adc_code_range', 'clip_point_count'}
 PER_POINT_DIAGNOSTIC_KEYS = tuple(
     key for key in DIAGNOSTIC_PATTERNS
@@ -40,6 +41,7 @@ HIGHPASS_NOISE_FLOOR_DROP_DB = 30.0
 HIGHPASS_NOISE_FLOOR_MIN_KEEP_POINTS = 12
 HIGHPASS_NOISE_FLOOR_MIN_REMOVE_POINTS = 3
 MIN_VALID_ANALYSIS_POINTS = 5
+MAX_FREQ_STEPS = 200
 
 EXPECTED_CIRCUIT_CHOICES = [
     'Auto',
@@ -135,6 +137,45 @@ def demo_segments_for_expected(expected: str):
     if target is None:
         return None
     return DEMO_SWEEP_SEGMENTS.get(target) or DEMO_SWEEP_SEGMENTS.get((target[0], None))
+
+
+def sweep_segment_point_count(f_start: float, f_stop: float, f_step: float) -> int:
+    if f_start <= 0.0 or f_stop < f_start or f_step <= 0.0:
+        return 0
+    return int((float(f_stop) - float(f_start)) / float(f_step)) + 1
+
+
+def get_visible_sweep_presets() -> list[dict]:
+    presets: list[dict] = []
+    for label in EXPECTED_CIRCUIT_CHOICES:
+        if label == 'Auto':
+            continue
+        segments = demo_segments_for_expected(label) or []
+        visible_segments = []
+        total_points = 0
+        for index, segment in enumerate(segments, start=1):
+            f_start, f_stop, f_step, amplitude_vpp = segment
+            points = sweep_segment_point_count(f_start, f_stop, f_step)
+            total_points += points
+            visible_segments.append(
+                {
+                    'index': index,
+                    'f_start_hz': float(f_start),
+                    'f_stop_hz': float(f_stop),
+                    'f_step_hz': float(f_step),
+                    'amplitude_vpp': float(amplitude_vpp),
+                    'points': points,
+                }
+            )
+        presets.append(
+            {
+                'label': label,
+                'target': EXPECTED_CIRCUIT_MAP.get(label),
+                'segments': visible_segments,
+                'total_points': total_points,
+            }
+        )
+    return presets
 
 
 def summarize_measurement_diagnostics(
@@ -901,7 +942,7 @@ def estimate_system_order(phase_deg: np.ndarray, omega: np.ndarray) -> tuple[int
 def fit_lowpass_order_from_magnitude(
     omega: np.ndarray,
     magnitude: np.ndarray,
-    max_order: int = 6,
+    max_order: int = MAX_STANDARD_SIMPLE_FILTER_ORDER,
 ) -> dict[str, object]:
     omega = np.asarray(omega, dtype=float).flatten()
     magnitude = np.asarray(magnitude, dtype=float).flatten()
@@ -986,7 +1027,7 @@ def assess_phase_quality(phase_deg: np.ndarray) -> dict[str, float]:
 def fit_lowpass_order_from_phase(
     omega: np.ndarray,
     phase_deg: np.ndarray,
-    max_order: int = 6,
+    max_order: int = MAX_STANDARD_SIMPLE_FILTER_ORDER,
 ) -> dict[str, object]:
     omega = np.asarray(omega, dtype=float).flatten()
     phase_deg = np.asarray(phase_deg, dtype=float).flatten()
@@ -1288,7 +1329,7 @@ def estimate_system_order_from_fit(
 def fit_highpass_order_from_magnitude(
     omega: np.ndarray,
     magnitude: np.ndarray,
-    max_order: int = 6,
+    max_order: int = MAX_STANDARD_SIMPLE_FILTER_ORDER,
 ) -> dict[str, object]:
     omega = np.asarray(omega, dtype=float).flatten()
     magnitude = np.asarray(magnitude, dtype=float).flatten()
@@ -1343,7 +1384,7 @@ def fit_highpass_order_from_magnitude(
 def fit_highpass_order_from_transition_band(
     omega: np.ndarray,
     magnitude: np.ndarray,
-    max_order: int = 6,
+    max_order: int = MAX_STANDARD_SIMPLE_FILTER_ORDER,
 ) -> dict[str, object] | None:
     omega = np.asarray(omega, dtype=float).flatten()
     magnitude = np.asarray(magnitude, dtype=float).flatten()
@@ -1425,15 +1466,29 @@ def refine_filter_order_with_template(
     if filter_type == 'lowpass':
         order, fit_notes = estimate_system_order_from_fit(magnitude, phase_deg, omega)
         notes.extend(fit_notes)
-        return int(np.clip(order, 1, 12)), notes
+        capped_order = cap_standard_filter_order(filter_type, order)
+        if capped_order != order:
+            notes.append(
+                f'低通模板拟合给出 {order} 阶，但本项目标准低通电路最高为三阶；'
+                f'最终按 {capped_order} 阶输出，并把更高阶视为噪声/寄生/有限扫频提示。'
+            )
+        return capped_order, notes
 
     if filter_type == 'highpass':
-        mag_fit = fit_highpass_order_from_magnitude(omega, magnitude)
+        mag_fit = fit_highpass_order_from_magnitude(
+            omega,
+            magnitude,
+            max_order=MAX_STANDARD_SIMPLE_FILTER_ORDER,
+        )
         order = int(mag_fit['order'])
         notes.append(
             f'High-pass magnitude fit prefers order {order}; magnitude RMSE = {float(mag_fit["rmse_db"]):.2f} dB.'
         )
-        transition_fit = fit_highpass_order_from_transition_band(omega, magnitude)
+        transition_fit = fit_highpass_order_from_transition_band(
+            omega,
+            magnitude,
+            max_order=MAX_STANDARD_SIMPLE_FILTER_ORDER,
+        )
         transition_order = int(transition_fit['order']) if transition_fit is not None else 0
         if transition_fit is not None:
             notes.append(
@@ -1446,8 +1501,11 @@ def refine_filter_order_with_template(
         slope = compute_mag_slope_db_per_dec(omega, magnitude)
         edge = max(3, min(12, len(slope) // 8)) if len(slope) else 0
         head_slope = float(np.median(slope[:edge])) if edge else 0.0
-        slope_order = estimate_order_from_slope(head_slope)
-        phase_order, phase_reliable = estimate_order_from_phase_span(phase_deg)
+        slope_order = estimate_order_from_slope(head_slope, max_order=MAX_STANDARD_SIMPLE_FILTER_ORDER)
+        phase_order, phase_reliable = estimate_order_from_phase_span(
+            phase_deg,
+            max_order=MAX_STANDARD_SIMPLE_FILTER_ORDER,
+        )
         mag_db = 20.0 * np.log10(np.clip(magnitude, 1e-12, None))
         mag_span_db = float(np.max(mag_db) - np.min(mag_db)) if len(mag_db) else 0.0
         phase_span_deg = float(abs(phase_deg[-1] - phase_deg[0])) if len(phase_deg) else 0.0
@@ -1527,7 +1585,13 @@ def refine_filter_order_with_template(
                 notes.append(f'Phase span is consistent with order {phase_order}.')
         else:
             notes.append('Phase trace is not reliable enough to raise the high-pass order.')
-        return int(np.clip(order, 1, 12)), notes
+        capped_order = cap_standard_filter_order(filter_type, order)
+        if capped_order != order:
+            notes.append(
+                f'高通局部拟合给出 {order} 阶，但本项目标准高通电路最高为三阶；'
+                f'最终按 {capped_order} 阶输出，避免智能补扫把三阶高通误升为更高阶。'
+            )
+        return capped_order, notes
 
     if filter_type == 'bandpass':
         peak_idx = int(np.argmax(magnitude))
@@ -1785,6 +1849,15 @@ def estimate_order_from_slope(slope_db_per_dec: float, max_order: int = 6) -> in
     if slope_abs < 10.0:
         return 0
     return int(np.clip(np.round(slope_abs / 20.0), 1, max_order))
+
+
+def cap_standard_filter_order(filter_type: str, order_estimate: int) -> int:
+    order_estimate = int(np.clip(order_estimate, 1, 12))
+    if filter_type in ('lowpass', 'highpass'):
+        return int(np.clip(order_estimate, 1, MAX_STANDARD_SIMPLE_FILTER_ORDER))
+    if filter_type in ('bandpass', 'bandstop'):
+        return max(2, order_estimate)
+    return order_estimate
 
 
 def estimate_order_from_phase_span(phase_deg: np.ndarray, max_order: int = 6) -> tuple[int, bool]:
@@ -2077,8 +2150,8 @@ def classify_filter_response(
     slope = compute_mag_slope_db_per_dec(omega, magnitude)
     head_slope = float(np.median(slope[:edge]))
     tail_slope = float(np.median(slope[-edge:]))
-    head_order = estimate_order_from_slope(head_slope)
-    tail_order = estimate_order_from_slope(tail_slope)
+    head_order = estimate_order_from_slope(head_slope, max_order=MAX_STANDARD_SIMPLE_FILTER_ORDER)
+    tail_order = estimate_order_from_slope(tail_slope, max_order=MAX_STANDARD_SIMPLE_FILTER_ORDER)
 
     low_to_high_db = db_ratio(low_gain, high_gain)
     high_to_low_db = db_ratio(high_gain, low_gain)
@@ -2203,6 +2276,14 @@ def classify_filter_response(
     else:
         notes.append('Response shape is not close to a standard low-pass/high-pass/band-pass/band-stop template.')
 
+    capped_order = cap_standard_filter_order(filter_type, order_estimate)
+    if capped_order != order_estimate and filter_type in ('lowpass', 'highpass'):
+        notes.append(
+            f'项目内置标准{FILTER_TYPE_LABELS.get(filter_type, "")}最高按三阶验收；'
+            f'局部斜率/拟合给出的 {order_estimate} 阶作为异常提示，不作为最终物理阶数。'
+        )
+        order_estimate = capped_order
+
     primary_omega = float(omega[peak_idx])
     left_cutoff_omega = float(omega[peak_idx])
     right_cutoff_omega: float | None = None
@@ -2263,8 +2344,8 @@ def classify_filter_response(
 
     return {
         'filter_type': filter_type,
-        'order_estimate': int(np.clip(order_estimate, 1, 12)),
-        'system_label': format_filter_system_label(filter_type, int(np.clip(order_estimate, 1, 12))),
+        'order_estimate': cap_standard_filter_order(filter_type, order_estimate),
+        'system_label': format_filter_system_label(filter_type, cap_standard_filter_order(filter_type, order_estimate)),
         'primary_omega': float(primary_omega),
         'left_cutoff_omega': float(left_cutoff_omega),
         'right_cutoff_omega': right_cutoff_omega,
@@ -2750,6 +2831,13 @@ def analyze_system_v2(
         notes.append(f'模型拟合将初始阶次 {order_estimate} 修正为 {refined_order}。')
         order_estimate = refined_order
     notes.extend(model_fit_notes)
+    capped_order = cap_standard_filter_order(filter_type, order_estimate)
+    if capped_order != order_estimate:
+        notes.append(
+            f'标准{FILTER_TYPE_LABELS.get(filter_type, "")}识别结果限制为 {capped_order} 阶；'
+            f'{order_estimate} 阶只作为寄生/噪声/有限扫频异常提示。'
+        )
+        order_estimate = capped_order
 
     identification = assess_identification_reliability(
         omega_for_identification,

@@ -19,6 +19,7 @@ from ai_diagnosis import (
     load_fault_knowledge_base,
     rank_diagnosis_candidates,
     run_intelligent_diagnosis,
+    transfer_fit_reliability_text,
 )
 from filter_analysis import analyze_system_v2
 from serial_protocol import parse_measurement_frame_from_text
@@ -147,6 +148,58 @@ class IntelligentDiagnosisTests(unittest.TestCase):
                 self.assertTrue(all(np.isfinite(tf.numerator)))
                 self.assertTrue(all(np.isfinite(tf.denominator)))
 
+    def test_third_order_highpass_transfer_function_keeps_selected_cascade_shape(self):
+        freq_hz = np.geomspace(80.0, 80000.0, 96)
+        omega = 2.0 * np.pi * freq_hz
+        pole_fc_hz = 1500.0
+        wc = 2.0 * np.pi * pole_fc_hz
+        x = omega / wc
+        magnitude = (x / np.sqrt(1.0 + x**2)) ** 3
+        phase = 3.0 * (np.pi / 2.0 - np.arctan(x))
+
+        fit = next(
+            item
+            for item in fit_transfer_templates(omega, magnitude, phase)
+            if item.model_family == "highpass" and item.order == 3
+        )
+        tf = build_equivalent_transfer_function(fit)
+
+        self.assertEqual(fit.model_shape, "cascade")
+        self.assertIsNotNone(tf)
+        self.assertEqual(len(tf.denominator), 4)
+        np.testing.assert_allclose(tf.denominator, [1.0, 3.0 * wc, 3.0 * wc**2, wc**3], rtol=5.0e-3)
+        np.testing.assert_allclose(tf.numerator, [1.0, 0.0, 0.0, 0.0], rtol=5.0e-3, atol=5.0e-3)
+
+    def test_third_order_highpass_transfer_function_keeps_selected_butterworth_shape(self):
+        freq_hz = np.geomspace(80.0, 80000.0, 96)
+        omega = 2.0 * np.pi * freq_hz
+        fc_hz = 1500.0
+        wc = 2.0 * np.pi * fc_hz
+        x = omega / wc
+        magnitude = x**3 / np.sqrt(1.0 + x**6)
+        phase = 3.0 * (np.pi / 2.0 - np.arctan(x))
+
+        fit = next(
+            item
+            for item in fit_transfer_templates(omega, magnitude, phase)
+            if item.model_family == "highpass" and item.order == 3
+        )
+        tf = build_equivalent_transfer_function(fit)
+
+        self.assertEqual(fit.model_shape, "butterworth")
+        self.assertIsNotNone(tf)
+        self.assertEqual(len(tf.denominator), 4)
+        np.testing.assert_allclose(tf.denominator, [1.0, 2.0 * wc, 2.0 * wc**2, wc**3], rtol=5.0e-3)
+
+    def test_low_quality_transfer_fit_is_marked_as_reference_only(self):
+        fit = SimpleNamespace(r_squared=0.845, rmse_db=2.13, max_residual_db=21.78)
+
+        text = transfer_fit_reliability_text(fit)
+
+        self.assertIn("低", text)
+        self.assertIn("不建议直接作为最终传函", text)
+        self.assertIn("最大残差=21.78 dB", text)
+
     def test_candidates_are_top3_and_sorted_descending(self):
         _, _, diagnosis = self._load_standard_case("二阶低通")
         confidences = [item.confidence for item in diagnosis.candidates]
@@ -183,6 +236,67 @@ class IntelligentDiagnosisTests(unittest.TestCase):
         self.assertIn("传统可靠锚定", candidates[0].evidence)
         self.assertGreaterEqual(candidates[0].confidence, 0.90)
 
+    def test_over_standard_highpass_anchor_is_capped_to_third_order(self):
+        freq_hz = np.geomspace(100.0, 20000.0, 96)
+        omega = 2.0 * np.pi * freq_hz
+        wc = 2.0 * np.pi * 1000.0
+        x = omega / wc
+        magnitude = (x**3) / np.sqrt(1.0 + x**6)
+        phase = 3.0 * (np.pi / 2.0 - np.arctan(x))
+        overfit_result = SimpleNamespace(
+            filter_type="highpass",
+            order_estimate=4,
+            order_reliable=True,
+            identification_confidence=0.97,
+            magnitude_cutoff_omega=wc,
+        )
+
+        diagnosis = run_intelligent_diagnosis(
+            omega,
+            magnitude,
+            phase,
+            analysis_result=overfit_result,
+        )
+        report = "\n".join(format_ai_diagnosis_report_lines(diagnosis))
+
+        self.assertEqual(diagnosis.circuit_type, "highpass")
+        self.assertEqual(diagnosis.order_estimate, 3)
+        self.assertEqual(diagnosis.candidates[0].order_estimate, 3)
+        self.assertIn("三阶高通系统", report)
+        self.assertNotIn("四阶高通系统", report)
+        self.assertIn("项目标准边界保护", diagnosis.decision_strategy)
+
+    def test_high_confidence_traditional_third_order_highpass_is_not_demoted(self):
+        freq_hz = np.arange(100.0, 20000.0 + 1.0, 100.0)
+        omega = 2.0 * np.pi * freq_hz
+        wc = 2.0 * np.pi * 1827.0
+        x = omega / wc
+        magnitude = (x**3) / np.sqrt(1.0 + x**6)
+        phase = 3.0 * (np.pi / 2.0 - np.arctan(x))
+        traditional_result = SimpleNamespace(
+            filter_type="highpass",
+            order_estimate=3,
+            order_reliable=False,
+            identification_confidence=0.95,
+            magnitude_cutoff_omega=wc,
+        )
+
+        diagnosis = run_intelligent_diagnosis(
+            omega,
+            magnitude,
+            phase,
+            analysis_result=traditional_result,
+        )
+        report = "\n".join(format_ai_diagnosis_report_lines(diagnosis))
+
+        self.assertEqual(diagnosis.circuit_type, "highpass")
+        self.assertEqual(diagnosis.order_estimate, 3)
+        self.assertEqual(diagnosis.candidates[0].order_estimate, 3)
+        self.assertGreater(diagnosis.candidates[0].confidence, diagnosis.candidates[1].confidence)
+        self.assertIn("三阶高通系统", report)
+        self.assertNotIn("智能识别: 二阶高通系统", report)
+        self.assertIn("传统高置信锚定", diagnosis.decision_strategy)
+
     def test_unreliable_traditional_analysis_does_not_override_feature_and_model(self):
         omega, mag, phase = _lowpass_fixture()
         features = extract_diagnosis_features(omega, mag, phase)
@@ -211,6 +325,7 @@ class IntelligentDiagnosisTests(unittest.TestCase):
         self.assertIn("模型拟合:", report)
         self.assertIn("等效传递函数:", report)
         self.assertIn("H(s) =", report)
+        self.assertIn("测量健康:", report)
         self.assertIn("测量质量:", report)
         self.assertIn("故障证据链:", report)
         self.assertIn("下一步测试建议:", report)

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 import time
-from typing import Protocol
+from typing import Callable, Protocol
 
 import numpy as np
 
@@ -52,7 +52,7 @@ DIAGNOSTIC_PATTERNS = {
     "clip_point_count": re.compile(r"Clip_point_count\s*=\s*\[(.*?)\]", re.IGNORECASE | re.DOTALL),
 }
 
-FRAME_TRAFFIC_PREFIXES = ("OK", "DONE", "ERR ", "WARN ", "READY", "Commands:")
+FRAME_TRAFFIC_PREFIXES = ("OK", "DONE", "ERR ", "WARN ", "READY", "Commands:", "PROGRESS", "STOPPED")
 
 
 class SerialLike(Protocol):
@@ -160,6 +160,7 @@ def read_measurement_frame_from_serial(
     timeout_sec: float,
     *,
     source: str = "serial",
+    line_callback: Callable[[str], None] | None = None,
 ) -> MeasurementFrame:
     deadline = time.monotonic() + max(float(timeout_sec), 1.0)
     pending: dict[str, np.ndarray] = {}
@@ -169,6 +170,8 @@ def read_measurement_frame_from_serial(
         line = decode_serial_line(ser.readline())
         if not line:
             continue
+        if line_callback is not None:
+            line_callback(line)
 
         key = measurement_line_key(line)
         if key is None:

@@ -33,6 +33,32 @@ class SmartResweepReader(threading.Thread):
         self.base_frame = base_frame
         self.sweep_steps = list(sweep_steps or [])[:3]
         self.expected_circuit = expected_circuit or "Auto"
+        self._ser = None
+        self._ser_lock = threading.Lock()
+
+    def send_stop_command(self):
+        with self._ser_lock:
+            if self._ser is None:
+                return False
+            write_ascii_command(self._ser, "STOP\n")
+            return True
+
+    def _line_callback(self, line: str):
+        if line.startswith("PROGRESS") or line.startswith("STOPPED"):
+            self.out_queue.put(("log", line))
+
+    def _read_frame(self, ser):
+        try:
+            return read_measurement_frame_from_serial(
+                ser,
+                self.stop_event,
+                self.timeout_sec,
+                line_callback=self._line_callback,
+            )
+        except TypeError as exc:
+            if "line_callback" not in str(exc):
+                raise
+            return read_measurement_frame_from_serial(ser, self.stop_event, self.timeout_sec)
 
     @staticmethod
     def _step_command_and_reason(step):
@@ -61,6 +87,8 @@ class SmartResweepReader(threading.Thread):
                 self.baudrate,
                 timeout=max(0.2, min(self.timeout_sec, 1.0)),
             )
+            with self._ser_lock:
+                self._ser = ser
             frames = [self.base_frame]
             for step in self.sweep_steps:
                 if self.stop_event.is_set():
@@ -72,7 +100,7 @@ class SmartResweepReader(threading.Thread):
                 command_to_send = command if command.endswith("\n") else command + "\n"
                 self.out_queue.put(("log", f"智能补扫: {command.strip()}，原因: {reason}"))
                 write_ascii_command(ser, command_to_send)
-                frames.append(read_measurement_frame_from_serial(ser, self.stop_event, self.timeout_sec))
+                frames.append(self._read_frame(ser))
 
             omega, mag, phase, diagnostics = merge_measurement_frames(frames)
             self.out_queue.put(

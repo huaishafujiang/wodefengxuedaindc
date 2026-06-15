@@ -30,8 +30,13 @@ def list_serial_ports():
     return [p.device for p in serial.tools.list_ports.comports()]
 
 
-def read_measurement_frame_from_serial(ser, stop_event, timeout_sec: float):
-    frame = read_protocol_measurement_frame_from_serial(ser, stop_event, timeout_sec)
+def read_measurement_frame_from_serial(ser, stop_event, timeout_sec: float, line_callback=None):
+    frame = read_protocol_measurement_frame_from_serial(
+        ser,
+        stop_event,
+        timeout_sec,
+        line_callback=line_callback,
+    )
     return frame.as_legacy_tuple()
 
 
@@ -46,6 +51,19 @@ class ThreeLineReader(threading.Thread):
         self.continuous = continuous
         self.command = command
         self.fallback_command = fallback_command
+        self._ser = None
+        self._ser_lock = threading.Lock()
+
+    def send_stop_command(self):
+        with self._ser_lock:
+            if self._ser is None:
+                return False
+            write_ascii_command(self._ser, "STOP\n")
+            return True
+
+    def _line_callback(self, line: str):
+        if line.startswith("PROGRESS") or line.startswith("STOPPED"):
+            self.out_queue.put(("log", line))
 
     def run(self):
         if serial is None:
@@ -55,6 +73,8 @@ class ThreeLineReader(threading.Thread):
         ser = None
         try:
             ser = open_serial_transport(serial, self.port, self.baudrate, self.timeout_sec)
+            with self._ser_lock:
+                self._ser = ser
 
             if self.command:
                 write_ascii_command(ser, self.command)
@@ -74,6 +94,7 @@ class ThreeLineReader(threading.Thread):
                         ser,
                         self.stop_event,
                         read_timeout,
+                        line_callback=self._line_callback,
                     )
                 except TimeoutError:
                     if not fallback_sent and self.fallback_command:
@@ -101,6 +122,8 @@ class ThreeLineReader(threading.Thread):
                     ser.close()
                 except Exception:
                     pass
+            with self._ser_lock:
+                self._ser = None
             self.out_queue.put(('log', '串口读取线程已结束'))
 
 
@@ -133,6 +156,19 @@ class AutoSweepReader(threading.Thread):
         self.fix_g431_axis = fix_g431_axis
         self.assumed_open_loop_rhp_poles = assumed_open_loop_rhp_poles
         self.invert_transfer = invert_transfer
+        self._ser = None
+        self._ser_lock = threading.Lock()
+
+    def send_stop_command(self):
+        with self._ser_lock:
+            if self._ser is None:
+                return False
+            write_ascii_command(self._ser, "STOP\n")
+            return True
+
+    def _line_callback(self, line: str):
+        if line.startswith("PROGRESS") or line.startswith("STOPPED"):
+            self.out_queue.put(("log", line))
 
     @staticmethod
     def _command_from_segment(segment):
@@ -175,6 +211,8 @@ class AutoSweepReader(threading.Thread):
                 self.baudrate,
                 timeout=max(0.2, min(self.timeout_sec, 1.0)),
             )
+            with self._ser_lock:
+                self._ser = ser
 
             frames = []
             expected_target = EXPECTED_CIRCUIT_MAP.get(self.expected_circuit)
@@ -191,7 +229,12 @@ class AutoSweepReader(threading.Thread):
                 coarse_command = self._command_from_segment(AUTO_COARSE_SWEEP)
                 self.out_queue.put(('log', f'自动识别粗扫: {coarse_command.strip()}'))
                 write_ascii_command(ser, coarse_command)
-                coarse_frame = read_measurement_frame_from_serial(ser, self.stop_event, self.timeout_sec)
+                coarse_frame = read_measurement_frame_from_serial(
+                    ser,
+                    self.stop_event,
+                    self.timeout_sec,
+                    line_callback=self._line_callback,
+                )
                 frames.append(coarse_frame)
 
                 candidate_type = self._candidate_type_from_coarse(coarse_frame)
@@ -207,7 +250,14 @@ class AutoSweepReader(threading.Thread):
                 sent.add(command.strip())
                 self.out_queue.put(('log', f'自动识别补扫: {command.strip()}'))
                 write_ascii_command(ser, command)
-                frames.append(read_measurement_frame_from_serial(ser, self.stop_event, self.timeout_sec))
+                frames.append(
+                    read_measurement_frame_from_serial(
+                        ser,
+                        self.stop_event,
+                        self.timeout_sec,
+                        line_callback=self._line_callback,
+                    )
+                )
 
             omega, mag, phase, diagnostics = merge_measurement_frames(frames)
             if demo_segments is not None:
