@@ -2,7 +2,7 @@
 
 
 a = Analysis(
-    ['main_window.py'],
+    ['main.py'],
     pathex=[],
     binaries=[],
     datas=[('diagnosis_knowledge_base.json', '.')],
@@ -35,4 +35,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon=['assets\\icons\\frequency_response_icon.ico'],
 )

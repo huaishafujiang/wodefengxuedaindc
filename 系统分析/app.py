@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import queue
+import tempfile
 import threading
 import time
 from datetime import datetime
@@ -23,13 +24,7 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolb
 from matplotlib.figure import Figure
 
 from ai_diagnosis import format_ai_diagnosis_report_lines, run_intelligent_diagnosis
-from calibration import (
-    CalibrationProfile,
-    apply_calibration,
-    build_calibration_profile,
-    profile_summary,
-)
-from component_diagnosis import profile_from_inputs
+from control_compensation import settings_from_inputs
 from diagnosis_view import diagnosis_clipboard_text, structured_diagnosis_sections
 from filter_analysis import (
     EXPECTED_CIRCUIT_CHOICES,
@@ -38,16 +33,16 @@ from filter_analysis import (
     analyze_system_v2,
     build_filter_report_lines,
     evaluate_expected_circuit,
-    get_visible_sweep_presets,
     sweep_segment_point_count,
 )
 from measurement_session import MeasurementSession
 from plotting import create_bode_nyquist_axes, plot_sessions
 from report_export import export_html_report
 from serial_protocol import build_sweep_command, parse_diagnostics_from_text, parse_measurement_frame_from_text
-from serial_readers import AutoSweepReader, ThreeLineReader, list_serial_ports
+from serial_readers import ThreeLineReader, list_serial_ports
 from serial_transport import open_serial_transport, write_ascii_command
 from smart_resweep_reader import SmartResweepReader
+from transfer_formula import build_transfer_formula_view, save_formula_png
 
 try:
     import serial
@@ -101,7 +96,6 @@ class MatlabExactApp:
         self.result: SystemAnalysisResult | None = None
         self.current_measurement = None
         self.ai_diagnosis = None
-        self.calibration_profile: CalibrationProfile | None = None
         self.font_name = configure_plot_fonts()
 
         self._build_ui()
@@ -274,13 +268,13 @@ class MatlabExactApp:
         self.poly_var = tk.StringVar(value="3")
         self.open_loop_p_var = tk.StringVar(value="0")
         self.expected_circuit_var = tk.StringVar(value="Auto")
-        self.calibration_enabled_var = tk.BooleanVar(value=True)
-        self.calibration_summary_var = tk.StringVar(value="未设置校正参考")
-        self.component_diagnosis_enabled_var = tk.BooleanVar(value=False)
-        self.component_r_values_var = tk.StringVar(value="10k")
-        self.component_c_values_var = tk.StringVar(value="10n")
-        self.component_r2_values_var = tk.StringVar(value="10k")
-        self.component_c2_values_var = tk.StringVar(value="10n")
+        self.control_compensation_enabled_var = tk.BooleanVar(value=True)
+        self.control_compensation_mode_var = tk.StringVar(value="自动")
+        self.control_target_pm_var = tk.StringVar(value="50")
+        self.control_target_gm_var = tk.StringVar(value="6")
+        self.control_safety_phase_var = tk.StringVar(value="8")
+        self.control_target_crossover_var = tk.StringVar(value="")
+        self.control_low_freq_boost_var = tk.StringVar(value="0")
 
     def _build_top_toolbar(self, parent):
         toolbar = ttk.Frame(parent, padding=(12, 8), style="Toolbar.TFrame")
@@ -391,7 +385,19 @@ class MatlabExactApp:
         diagnosis_box.grid(row=0, column=0, sticky="ew")
         diagnosis_box.columnconfigure(1, weight=1)
         self.diagnosis_vars: dict[str, tk.StringVar] = {}
-        summary_keys = ("判定", "置信度", "测量健康", "关键频率", "Top3", "测量质量", "故障证据", "下一步建议")
+        summary_keys = (
+            "判定",
+            "置信度",
+            "测量健康",
+            "AI结论",
+            "关键频率",
+            "Top3",
+            "测量质量",
+            "控制校正",
+            "测量补扫",
+            "故障证据",
+            "下一步建议",
+        )
         for row, key in enumerate(summary_keys):
             ttk.Label(diagnosis_box, text=key, style="SurfaceMuted.TLabel").grid(row=row, column=0, sticky="nw", pady=3)
             var = tk.StringVar(value="暂无")
@@ -416,6 +422,12 @@ class MatlabExactApp:
             command=self.command_smart_resweep,
             style="Primary.TButton",
         ).grid(row=0, column=1, sticky="ew")
+        ttk.Button(
+            diagnosis_actions,
+            text="手动补扫",
+            command=self.command_manual_resweep,
+            style="Secondary.TButton",
+        ).grid(row=1, column=1, sticky="ew", padx=(6, 0), pady=(6, 0))
 
         history_box = ttk.LabelFrame(parent, text="测量历史", padding=10, style="Surface.TLabelframe")
         history_box.grid(row=1, column=0, sticky="nsew", pady=(10, 0))
@@ -460,21 +472,18 @@ class MatlabExactApp:
         log_tab = ttk.Frame(notebook, padding=8, style="Surface.TFrame")
         report_tab = ttk.Frame(notebook, padding=8, style="Surface.TFrame")
         advanced_tab = ttk.Frame(notebook, padding=10, style="Surface.TFrame")
-        calibration_tab = ttk.Frame(notebook, padding=10, style="Surface.TFrame")
-        component_tab = ttk.Frame(notebook, padding=10, style="Surface.TFrame")
+        control_tab = ttk.Frame(notebook, padding=10, style="Surface.TFrame")
         export_tab = ttk.Frame(notebook, padding=10, style="Surface.TFrame")
         notebook.add(log_tab, text="流水日志")
         notebook.add(report_tab, text="详细报告")
         notebook.add(advanced_tab, text="高级扫频参数")
-        notebook.add(calibration_tab, text="参考校正")
-        notebook.add(component_tab, text="元件偏差诊断")
+        notebook.add(control_tab, text="自动控制校正")
         notebook.add(export_tab, text="导出设置")
 
         self._build_log_tab(log_tab)
         self._build_report_tab(report_tab)
         self._build_advanced_tab(advanced_tab)
-        self._build_calibration_tab(calibration_tab)
-        self._build_component_diagnosis_tab(component_tab)
+        self._build_control_compensation_tab(control_tab)
         self._build_export_tab(export_tab)
 
     def _build_log_tab(self, parent):
@@ -557,65 +566,38 @@ class MatlabExactApp:
         )
         self.expected_circuit_box.grid(row=0, column=9, sticky="w", padx=(6, 0))
 
-    def _build_calibration_tab(self, parent):
-        parent.columnconfigure(0, weight=1)
-        ttk.Checkbutton(parent, text="启用参考校正", variable=self.calibration_enabled_var).grid(
-            row=0, column=0, sticky="w", pady=(0, 8)
-        )
-        ttk.Label(parent, textvariable=self.calibration_summary_var, style="Surface.TLabel", wraplength=980).grid(
-            row=1, column=0, columnspan=4, sticky="ew", pady=(0, 10)
-        )
-
-        actions = ttk.Frame(parent, style="Surface.TFrame")
-        actions.grid(row=2, column=0, sticky="w")
-        ttk.Button(
-            actions,
-            text="当前 session 设为参考",
-            command=self.set_current_session_as_calibration,
-            style="Secondary.TButton",
-        ).grid(row=0, column=0, sticky="w", padx=(0, 8))
-        ttk.Button(
-            actions,
-            text="导入参考文本",
-            command=self.import_calibration_text,
-            style="Secondary.TButton",
-        ).grid(row=0, column=1, sticky="w", padx=(0, 8))
-        ttk.Button(
-            actions,
-            text="清除校正",
-            command=self.clear_calibration,
-            style="Secondary.TButton",
-        ).grid(row=0, column=2, sticky="w")
-
-        hint = (
-            "校正参考建议使用直通线或已知 1 倍参考链路测得的 omega / Magnitude_data / "
-            "Phase_data_rad；后续测量会自动按频点插值补偿幅值和相位。"
-        )
-        ttk.Label(parent, text=hint, style="SurfaceMuted.TLabel", wraplength=980).grid(
-            row=3, column=0, sticky="ew", pady=(10, 0)
-        )
-
-    def _build_component_diagnosis_tab(self, parent):
+    def _build_control_compensation_tab(self, parent):
         parent.columnconfigure(1, weight=1)
         parent.columnconfigure(3, weight=1)
+        parent.columnconfigure(5, weight=1)
 
         ttk.Checkbutton(
             parent,
-            text="启用单元件偏差诊断",
-            variable=self.component_diagnosis_enabled_var,
-        ).grid(row=0, column=0, columnspan=4, sticky="w", pady=(0, 10))
+            text="启用自动控制校正",
+            variable=self.control_compensation_enabled_var,
+        ).grid(row=0, column=0, columnspan=6, sticky="w", pady=(0, 10))
 
-        self._entry(parent, 1, 0, "R 标称列表", self.component_r_values_var, width=26, padx=(6, 18))
-        self._entry(parent, 1, 2, "C 标称列表", self.component_c_values_var, width=26, padx=(6, 0))
-        self._entry(parent, 2, 0, "第二组 R", self.component_r2_values_var, width=26, padx=(6, 18))
-        self._entry(parent, 2, 2, "第二组 C", self.component_c2_values_var, width=26, padx=(6, 0))
+        ttk.Label(parent, text="校正类型", style="Surface.TLabel").grid(row=1, column=0, sticky="w")
+        ttk.Combobox(
+            parent,
+            textvariable=self.control_compensation_mode_var,
+            values=("自动", "超前", "滞后", "滞后-超前"),
+            width=12,
+            state="readonly",
+        ).grid(row=1, column=1, sticky="ew", padx=(6, 18), pady=(0, 8))
+        self._entry(parent, 1, 2, "目标 PM °", self.control_target_pm_var, width=8, padx=(6, 18))
+        self._entry(parent, 1, 4, "最小 GM dB", self.control_target_gm_var, width=8, padx=(6, 0))
+
+        self._entry(parent, 2, 0, "安全相位 °", self.control_safety_phase_var, width=8, padx=(6, 18))
+        self._entry(parent, 2, 2, "目标穿越 Hz", self.control_target_crossover_var, width=10, padx=(6, 18))
+        self._entry(parent, 2, 4, "低频增益 dB", self.control_low_freq_boost_var, width=8, padx=(6, 0))
 
         hint = (
-            "低通/高通可填单个值并自动扩展到阶数，也可填 10k,10k,10k；"
-            "带通/带阻使用第一组和第二组 R/C 估计两个边界或中心频率。"
+            "这里是自动控制原理里的校正：用实测开环 Bode 数据计算当前相位裕度/增益裕度；"
+            "若不满足目标，自动给出 Gc(s)、零极点、alpha/beta/T 和预计校正后裕度。"
         )
         ttk.Label(parent, text=hint, style="SurfaceMuted.TLabel", wraplength=980).grid(
-            row=3, column=0, columnspan=4, sticky="ew", pady=(10, 0)
+            row=3, column=0, columnspan=6, sticky="ew", pady=(8, 0)
         )
 
     def _build_export_tab(self, parent):
@@ -634,6 +616,9 @@ class MatlabExactApp:
         )
         ttk.Button(parent, text="智能补扫", command=self.command_smart_resweep, style="Secondary.TButton").grid(
             row=1, column=0, sticky="w", pady=(12, 0), padx=(0, 8)
+        )
+        ttk.Button(parent, text="手动补扫", command=self.command_manual_resweep, style="Secondary.TButton").grid(
+            row=1, column=1, sticky="w", pady=(12, 0), padx=(0, 8)
         )
 
     def _open_plot_zoom(self, kind: str):
@@ -695,12 +680,30 @@ class MatlabExactApp:
             return "分析中..."
         return "暂无报告。"
 
+    def _report_zoom_sections(self) -> dict[str, str]:
+        session = self.current_session
+        if session is None:
+            return {
+                "诊断摘要": "暂无测量。",
+                "等效传函": "暂无等效传递函数。",
+                "完整报告": self._current_report_text(),
+            }
+        summary_lines = [f"{key}: {value}" for key, value in structured_diagnosis_sections(session).items()]
+        formula_view = build_transfer_formula_view(session)
+        return {
+            "诊断摘要": "\n".join(summary_lines),
+            "等效传函": formula_view.copy_text(),
+            "完整报告": self._current_report_text(),
+        }
+
     def open_report_zoom(self):
-        text = self._current_report_text()
+        sections = self._report_zoom_sections()
+        text = "\n\n".join(f"### {title}\n{body}" for title, body in sections.items())
+        formula_view = build_transfer_formula_view(self.current_session)
         win = tk.Toplevel(self.root)
         win.title("详细报告放大")
-        win.geometry("1060x760")
-        win.minsize(760, 520)
+        win.geometry("1220x820")
+        win.minsize(900, 620)
         win.configure(bg=self.colors["bg"])
 
         host = ttk.Frame(win, padding=10, style="App.TFrame")
@@ -722,10 +725,27 @@ class MatlabExactApp:
             style="Secondary.TButton",
         ).grid(row=0, column=2, sticky="e", padx=(8, 0))
 
-        zoom_text = tk.Text(
-            host,
+        notebook = ttk.Notebook(host)
+        notebook.grid(row=1, column=0, sticky="nsew")
+
+        formula_tab = ttk.Frame(notebook, padding=12, style="Surface.TFrame")
+        summary_tab = ttk.Frame(notebook, padding=10, style="Surface.TFrame")
+        raw_tab = ttk.Frame(notebook, padding=10, style="Surface.TFrame")
+        notebook.add(formula_tab, text="等效传函公式")
+        notebook.add(summary_tab, text="诊断摘要")
+        notebook.add(raw_tab, text="完整报告")
+
+        self._build_formula_zoom_tab(formula_tab, formula_view)
+        self._build_report_text_tab(summary_tab, sections["诊断摘要"], font=("Microsoft YaHei", 11))
+        self._build_report_text_tab(raw_tab, sections["完整报告"], font=("Consolas", 11))
+
+    def _build_report_text_tab(self, parent, text: str, font):
+        parent.rowconfigure(0, weight=1)
+        parent.columnconfigure(0, weight=1)
+        text_widget = tk.Text(
+            parent,
             wrap="word",
-            font=("Consolas", 11),
+            font=font,
             relief="flat",
             padx=14,
             pady=12,
@@ -733,12 +753,60 @@ class MatlabExactApp:
             fg=self.colors["ink"],
             insertbackground=self.colors["ink"],
         )
-        zoom_text.grid(row=1, column=0, sticky="nsew")
-        zoom_scroll = ttk.Scrollbar(host, orient="vertical", command=zoom_text.yview)
-        zoom_scroll.grid(row=1, column=1, sticky="ns")
-        zoom_text.configure(yscrollcommand=zoom_scroll.set)
-        zoom_text.insert("1.0", text)
-        zoom_text.focus_set()
+        text_widget.grid(row=0, column=0, sticky="nsew")
+        scroll = ttk.Scrollbar(parent, orient="vertical", command=text_widget.yview)
+        scroll.grid(row=0, column=1, sticky="ns")
+        text_widget.configure(yscrollcommand=scroll.set)
+        text_widget.insert("1.0", text)
+
+    def _build_formula_zoom_tab(self, parent, formula_view):
+        parent.rowconfigure(1, weight=1)
+        parent.columnconfigure(0, weight=1)
+        ttk.Label(parent, text=formula_view.title, style="Header.TLabel").grid(row=0, column=0, sticky="w")
+
+        card = tk.Frame(parent, bg="#ffffff", highlightthickness=1, highlightbackground=self.colors["border"])
+        card.grid(row=1, column=0, sticky="nsew", pady=(10, 0))
+        card.columnconfigure(0, weight=1)
+
+        image_path = Path(tempfile.gettempdir()) / f"stm32g431_formula_session_{getattr(self.current_session, 'id', 'preview')}.png"
+        rendered = save_formula_png(formula_view, image_path)
+        if rendered:
+            try:
+                formula_image = tk.PhotoImage(file=str(image_path))
+                image_label = tk.Label(card, image=formula_image, bg="#ffffff")
+                image_label.image = formula_image
+                image_label.grid(row=0, column=0, sticky="ew", padx=18, pady=(18, 6))
+            except Exception:
+                rendered = False
+        if not rendered:
+            tk.Label(
+                card,
+                text=formula_view.plain,
+                bg="#ffffff",
+                fg=self.colors["ink"],
+                font=("Consolas", 18, "bold"),
+                wraplength=980,
+                justify="center",
+            ).grid(row=0, column=0, sticky="ew", padx=18, pady=(20, 10))
+
+        detail_text = "\n".join(f"• {line}" for line in formula_view.details + formula_view.schematic_notes if line)
+        tk.Label(
+            card,
+            text=detail_text or "暂无等效传递函数。请先完成测量和 AI 诊断。",
+            bg="#ffffff",
+            fg=self.colors["muted"],
+            font=("Microsoft YaHei", 11),
+            justify="left",
+            anchor="w",
+            wraplength=980,
+        ).grid(row=1, column=0, sticky="ew", padx=22, pady=(10, 18))
+
+        ttk.Button(
+            parent,
+            text="复制公式说明",
+            command=lambda: self._copy_text_to_clipboard(formula_view.copy_text(), "等效传函公式已复制到剪贴板。"),
+            style="Secondary.TButton",
+        ).grid(row=2, column=0, sticky="e", pady=(10, 0))
 
     def _entry(self, parent, row, col, label, variable, width=10, padx=(8, 12)):
         ttk.Label(parent, text=label, style="Surface.TLabel").grid(row=row, column=col, sticky="w")
@@ -880,8 +948,8 @@ class MatlabExactApp:
         assumed_p = self._get_assumed_open_loop_poles()
         if assumed_p is None:
             return None
-        component_profile = self._component_profile_from_ui(show_errors=True)
-        if component_profile is None and bool(self.component_diagnosis_enabled_var.get()):
+        control_settings = self._control_compensation_settings_from_ui(show_errors=True)
+        if control_settings is None and bool(self.control_compensation_enabled_var.get()):
             return None
         try:
             return {
@@ -891,28 +959,26 @@ class MatlabExactApp:
                 "fix_g431_axis": bool(self.fix_var.get()),
                 "assumed_open_loop_rhp_poles": int(assumed_p),
                 "invert_transfer": bool(self.swap_io_var.get()),
-                "component_profile": component_profile,
+                "control_compensation_settings": control_settings,
             }
         except ValueError:
             messagebox.showwarning("提示", "分析参数格式不正确。")
             return None
 
-    def _component_profile_from_ui(self, show_errors: bool = True):
-        if not bool(self.component_diagnosis_enabled_var.get()):
-            return None
+    def _control_compensation_settings_from_ui(self, show_errors: bool = True):
         try:
-            return profile_from_inputs(
-                self.expected_circuit_var.get().strip() or "Auto",
-                self.component_r_values_var.get(),
-                self.component_c_values_var.get(),
-                self.component_r2_values_var.get(),
-                self.component_c2_values_var.get(),
-                enabled=True,
-                calibrated=self.calibration_profile is not None and bool(self.calibration_enabled_var.get()),
+            return settings_from_inputs(
+                enabled=bool(self.control_compensation_enabled_var.get()),
+                mode=self.control_compensation_mode_var.get(),
+                target_phase_margin=self.control_target_pm_var.get(),
+                target_gain_margin_db=self.control_target_gm_var.get(),
+                safety_phase=self.control_safety_phase_var.get(),
+                target_crossover_hz=self.control_target_crossover_var.get(),
+                low_frequency_gain_boost_db=self.control_low_freq_boost_var.get(),
             )
         except Exception as exc:
             if show_errors:
-                messagebox.showwarning("元件偏差诊断参数错误", str(exc))
+                messagebox.showwarning("自动控制校正参数错误", str(exc))
             return None
 
     def _start_reader(self, command):
@@ -953,45 +1019,6 @@ class MatlabExactApp:
             return
         self._start_reader(command=command)
 
-    def command_auto_identify(self):
-        if self.reader is not None and self.reader.is_alive():
-            messagebox.showinfo("提示", "读取线程已在运行。")
-            return
-        settings = self._analysis_settings()
-        if settings is None:
-            return
-        port = self.port_var.get().strip()
-        if not port:
-            messagebox.showwarning("提示", "请先选择串口。")
-            return
-        try:
-            baudrate = int(self.baud_var.get().strip())
-            timeout_sec = float(self.timeout_var.get().strip())
-        except ValueError:
-            messagebox.showwarning("提示", "串口参数格式不正确。")
-            return
-
-        expected = self.expected_circuit_var.get().strip() or "Auto"
-        self.stop_event.clear()
-        self.reader = AutoSweepReader(
-            port=port,
-            baudrate=baudrate,
-            timeout_sec=timeout_sec,
-            out_queue=self.queue,
-            stop_event=self.stop_event,
-            expected_circuit=expected,
-            smooth=settings["smooth"],
-            window_length=settings["window_length"],
-            polyorder=settings["polyorder"],
-            fix_g431_axis=settings["fix_g431_axis"],
-            assumed_open_loop_rhp_poles=settings["assumed_open_loop_rhp_poles"],
-            invert_transfer=settings["invert_transfer"],
-        )
-        self.reader.start()
-        self.connection_state_var.set(f"{port} @ {baudrate}")
-        self.status_var.set("自动识别扫频中")
-        self.log(f"开始八类自动识别；期望电路={expected}。")
-
     def stop_reading(self):
         self.stop_event.set()
         self.status_var.set("已请求停止")
@@ -1030,7 +1057,11 @@ class MatlabExactApp:
             return
         sweep_plan = getattr(self.ai_diagnosis, "active_sweep_plan", None)
         if not sweep_plan:
-            messagebox.showinfo("提示", "当前诊断没有生成智能补扫计划。")
+            suggestions = getattr(self.ai_diagnosis, "measurement_suggestions", None)
+            if not suggestions:
+                suggestions = getattr(self.ai_diagnosis, "next_test_suggestions", None)
+            hint = "；".join(suggestions or ["当前数据已可验收，无需继续智能补扫。"])
+            messagebox.showinfo("智能补扫", f"当前没有可执行的智能补扫计划。\n\n{hint}")
             return
         port = self.port_var.get().strip()
         if not port:
@@ -1054,11 +1085,57 @@ class MatlabExactApp:
             base_frame=self.current_session.as_legacy_tuple(),
             sweep_steps=sweep_plan,
             expected_circuit=expected,
+            mode_label="智能补扫",
+            merged_source="智能补扫合并结果",
         )
         self.reader.start()
         self.connection_state_var.set(f"{port} @ {baudrate}")
         self.status_var.set("智能补扫中")
         self.log(f"开始智能补扫，共 {len(sweep_plan)} 条 SWEEP 命令。")
+
+    def command_manual_resweep(self):
+        if self.reader is not None and self.reader.is_alive():
+            messagebox.showinfo("提示", "读取线程正在运行，请先停止或等待完成。")
+            return
+        if self.current_session is None or not self.current_session.has_complete_arrays:
+            messagebox.showinfo("提示", "请先完成一次基础测量，再执行手动补扫。")
+            return
+        command = self._build_sweep_command()
+        if command is None:
+            return
+        port = self.port_var.get().strip()
+        if not port:
+            messagebox.showwarning("提示", "请先选择串口。")
+            return
+        try:
+            baudrate = int(self.baud_var.get().strip())
+            timeout_sec = float(self.timeout_var.get().strip())
+        except ValueError:
+            messagebox.showwarning("提示", "串口参数格式不正确。")
+            return
+
+        expected = self.expected_circuit_var.get().strip() or "Auto"
+        self.stop_event.clear()
+        manual_step = {
+            "command": command.strip(),
+            "reason": "手动补扫: 使用上方扫频参数加密当前 session",
+        }
+        self.reader = SmartResweepReader(
+            port=port,
+            baudrate=baudrate,
+            timeout_sec=timeout_sec,
+            out_queue=self.queue,
+            stop_event=self.stop_event,
+            base_frame=self.current_session.as_legacy_tuple(),
+            sweep_steps=[manual_step],
+            expected_circuit=expected,
+            mode_label="手动补扫",
+            merged_source="手动补扫合并结果",
+        )
+        self.reader.start()
+        self.connection_state_var.set(f"{port} @ {baudrate}")
+        self.status_var.set("手动补扫中")
+        self.log(f"开始手动补扫: {command.strip()}，将与当前 session #{self.current_session.id} 合并分析。")
 
     def run_ai_diagnosis_for_current(self):
         if self.current_session is None or self.current_session.result is None:
@@ -1070,15 +1147,17 @@ class MatlabExactApp:
 
     def _diagnosis_worker(self, session: MeasurementSession):
         try:
+            control_settings = session.analysis_settings.get("control_compensation_settings")
             diagnosis = run_intelligent_diagnosis(
                 session.omega,
                 session.magnitude,
                 session.phase,
                 diagnostics=session.diagnostics,
                 analysis_result=session.result,
-                component_profile=session.analysis_settings.get("component_profile"),
+                control_compensation_settings=control_settings,
             )
             session.ai_diagnosis = diagnosis
+            session.control_compensation_report = getattr(diagnosis, "control_compensation_report", None)
             session.report_lines = self._build_session_report_lines(session, session.result, diagnosis)
             self.queue.put(("diagnosis_done", session.id))
         except Exception as exc:
@@ -1099,83 +1178,13 @@ class MatlabExactApp:
         except Exception as exc:
             messagebox.showerror("导入失败", str(exc))
 
-    def import_calibration_text(self):
-        path = filedialog.askopenfilename(
-            title="选择校正参考文本",
-            filetypes=[("Text", "*.txt *.log *.m *.csv"), ("All", "*.*")],
-        )
-        if not path:
-            return
-        try:
-            text = Path(path).read_text(encoding="utf-8", errors="ignore")
-            omega, mag, phase = parse_arrays_from_text(text)
-            self._set_calibration_profile(
-                omega,
-                mag,
-                phase,
-                source=f"参考文件: {Path(path).name}",
-            )
-        except Exception as exc:
-            messagebox.showerror("校正参考导入失败", str(exc))
-
-    def set_current_session_as_calibration(self):
-        if self.current_session is None or not self.current_session.has_complete_arrays:
-            messagebox.showinfo("提示", "当前没有可用 session 可作为校正参考。")
-            return
-        session = self.current_session
-        try:
-            self._set_calibration_profile(
-                session.raw_omega,
-                session.raw_magnitude,
-                session.raw_phase,
-                source=f"session #{session.id} {session.created_at.strftime('%H:%M:%S')}",
-            )
-        except Exception as exc:
-            messagebox.showerror("校正参考设置失败", str(exc))
-
-    def clear_calibration(self):
-        self.calibration_profile = None
-        self.calibration_summary_var.set(profile_summary(None))
-        self.log("已清除参考校正；后续测量将使用原始幅相数据。")
-
-    def _set_calibration_profile(self, omega, mag, phase, source: str):
-        profile = build_calibration_profile(omega, mag, phase, source=source)
-        self.calibration_profile = profile
-        self.calibration_enabled_var.set(True)
-        summary = profile_summary(profile)
-        self.calibration_summary_var.set(summary)
-        self.log(f"校正参考已更新：{summary}")
-
-    def _apply_calibration_if_enabled(self, omega, mag, phase):
-        profile = self.calibration_profile
-        if profile is None or not bool(self.calibration_enabled_var.get()):
-            return omega, mag, phase, "", []
-        corrected = apply_calibration(omega, mag, phase, profile)
-        return (
-            corrected.omega,
-            corrected.magnitude,
-            corrected.phase_rad,
-            profile.label,
-            corrected.notes,
-        )
-
     def handle_frame(self, omega, mag, phase, source="串口", diagnostics=None):
         settings = self._analysis_settings()
         if settings is None:
             return
-        raw_omega = np.asarray(omega, dtype=float).flatten()
-        raw_mag = np.asarray(mag, dtype=float).flatten()
-        raw_phase = np.asarray(phase, dtype=float).flatten()
-        try:
-            omega, mag, phase, calibration_label, calibration_notes = self._apply_calibration_if_enabled(
-                raw_omega,
-                raw_mag,
-                raw_phase,
-            )
-        except Exception as exc:
-            messagebox.showerror("校正失败", str(exc))
-            self.log(f"校正失败：{exc}")
-            return
+        omega = np.asarray(omega, dtype=float).flatten()
+        mag = np.asarray(mag, dtype=float).flatten()
+        phase = np.asarray(phase, dtype=float).flatten()
         session = MeasurementSession(
             id=self._next_session_id,
             created_at=datetime.now(),
@@ -1183,9 +1192,9 @@ class MatlabExactApp:
             omega=omega,
             magnitude=mag,
             phase=phase,
-            raw_omega=raw_omega,
-            raw_magnitude=raw_mag,
-            raw_phase=raw_phase,
+            raw_omega=omega,
+            raw_magnitude=mag,
+            raw_phase=phase,
             diagnostics=diagnostics or {},
             expected_circuit=self.expected_circuit_var.get().strip() or "Auto",
             serial_port=self.port_var.get().strip(),
@@ -1193,22 +1202,19 @@ class MatlabExactApp:
             sweep_command=self._build_sweep_command(show_errors=False) or "",
             analysis_settings=settings,
             status="pending",
-            calibration_label=calibration_label,
-            calibration_notes=calibration_notes,
         )
         self._next_session_id += 1
         self.sessions.append(session)
         self._insert_history_session(session)
         self._select_session(session)
         self.status_var.set(f"{source} 已创建 session，后台分析中")
-        calibration_text = f"，已应用校正 {calibration_label}" if calibration_label else ""
-        self.log(f"{source} 接收成功：session #{session.id}，点数 {session.point_count}{calibration_text}，已投递分析线程。")
+        self.log(f"{source} 接收成功：session #{session.id}，点数 {session.point_count}，已投递分析线程。")
         threading.Thread(target=self._analysis_worker, args=(session,), daemon=True).start()
 
     def _analysis_worker(self, session: MeasurementSession):
         try:
             settings = dict(session.analysis_settings)
-            component_profile = settings.pop("component_profile", None)
+            control_settings = settings.pop("control_compensation_settings", None)
             result = analyze_system_v2(
                 session.omega,
                 session.magnitude,
@@ -1219,8 +1225,6 @@ class MatlabExactApp:
             expected = session.expected_circuit or "Auto"
             result.expected_circuit = expected
             result.expected_match_text = evaluate_expected_circuit(result, expected)
-            if session.calibration_notes:
-                result.notes.extend(session.calibration_notes)
             result.notes.append(result.expected_match_text)
             diagnosis = run_intelligent_diagnosis(
                 session.omega,
@@ -1228,10 +1232,11 @@ class MatlabExactApp:
                 session.phase,
                 diagnostics=session.diagnostics,
                 analysis_result=result,
-                component_profile=component_profile,
+                control_compensation_settings=control_settings,
             )
             session.result = result
             session.ai_diagnosis = diagnosis
+            session.control_compensation_report = getattr(diagnosis, "control_compensation_report", None)
             session.report_lines = self._build_session_report_lines(session, result, diagnosis)
             session.status = "done"
             self.queue.put(("analysis_done", session.id))
@@ -1241,55 +1246,7 @@ class MatlabExactApp:
             self.queue.put(("analysis_done", session.id))
 
     def _build_session_report_lines(self, session: MeasurementSession, result, diagnosis) -> list[str]:
-        calibration_lines = []
-        if session.calibration_applied:
-            calibration_lines = [
-                "--- 参考校正 ---",
-                f"校正参考: {session.calibration_label}",
-                *session.calibration_notes,
-                "",
-            ]
-        return build_filter_report_lines(result) + calibration_lines + [""] + format_ai_diagnosis_report_lines(diagnosis)
-
-    def _populate_presets(self):
-        self.preset_by_iid = {}
-        if not hasattr(self, "preset_tree"):
-            return
-        for preset in get_visible_sweep_presets():
-            for segment in preset["segments"]:
-                iid = f"{preset['label']}:{segment['index']}"
-                self.preset_by_iid[iid] = (preset, segment)
-                self.preset_tree.insert(
-                    "",
-                    "end",
-                    iid=iid,
-                    values=(
-                        preset["label"],
-                        segment["index"],
-                        f"{segment['f_start_hz']:g}",
-                        f"{segment['f_stop_hz']:g}",
-                        f"{segment['f_step_hz']:g}",
-                        f"{segment['amplitude_vpp']:g}",
-                        segment["points"],
-                        preset["total_points"],
-                    ),
-                )
-
-    def _on_preset_select(self, _event=None):
-        if not hasattr(self, "preset_tree"):
-            return
-        selection = self.preset_tree.selection()
-        if not selection:
-            return
-        preset, segment = self.preset_by_iid.get(selection[0], (None, None))
-        if not preset or not segment:
-            return
-        self.expected_circuit_var.set(preset["label"])
-        self.f_start_var.set(f"{segment['f_start_hz']:g}")
-        self.f_stop_var.set(f"{segment['f_stop_hz']:g}")
-        self.f_step_var.set(f"{segment['f_step_hz']:g}")
-        self.amp_var.set(f"{segment['amplitude_vpp']:g}")
-        self.log(f"已载入预设 {preset['label']} 第 {segment['index']} 段到手动扫频框。")
+        return build_filter_report_lines(result) + [""] + format_ai_diagnosis_report_lines(diagnosis)
 
     def _insert_history_session(self, session: MeasurementSession):
         iid = str(session.id)

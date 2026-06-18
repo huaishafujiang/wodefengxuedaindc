@@ -1,14 +1,37 @@
 # Python caches
 __pycache__/
+**/__pycache__/
 *.py[cod]
 *$py.class
+.pytest_cache/
+**/.pytest_cache/
 
-# Local logs
-*.log
+# Local editor/project state
 .idea/
+.vscode/
+
+# Local logs and scratch files
+*.log
+tmp/
+tmp/**
 com6_*.txt
 gui_default_*.txt
 wide_*.txt
+
+# Python UI/package build output
+系统分析/build/
+系统分析/dist/
+系统分析/*.spec.bak
+
+# Development-only tests
+系统分析/test_*.py
+
+# Measurement/demo exports
+系统分析/*.npz
+系统分析/*.csv
+系统分析/*.html
+系统分析/*.png
+项目文档/report_session_*/
 
 # Keil/MDK generated output
 G431CBTx_sweep/MDK-ARM/G431CBTx_sweep/

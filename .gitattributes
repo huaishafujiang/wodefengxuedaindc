@@ -1,0 +1,11 @@
+*.docx binary
+*.exe binary
+*.gz binary
+*.ico binary
+*.jpg binary
+*.jpeg binary
+*.pdf binary
+*.png binary
+*.tar binary
+*.vsdx binary
+*.zip binary

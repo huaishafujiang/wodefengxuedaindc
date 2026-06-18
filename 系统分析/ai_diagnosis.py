@@ -8,10 +8,10 @@ from typing import Any
 
 import numpy as np
 
-from component_diagnosis import (
-    ComponentDeviationReport,
-    diagnose_component_deviation,
-    format_component_report_lines,
+from control_compensation import (
+    ControlCompensationReport,
+    build_control_compensation_report,
+    format_control_compensation_report_lines,
 )
 from serial_protocol import build_sweep_command
 
@@ -160,6 +160,10 @@ class IntelligentDiagnosis:
     measurement_quality: list[str] = field(default_factory=list)
     possible_faults: list[str] = field(default_factory=list)
     next_test_suggestions: list[str] = field(default_factory=list)
+    measurement_suggestions: list[str] = field(default_factory=list)
+    control_suggestions: list[str] = field(default_factory=list)
+    practical_conclusion: str = ""
+    experiment_recommendations: list[str] = field(default_factory=list)
     adaptive_sweep_commands: list[str] = field(default_factory=list)
     features: DiagnosisFeatures | None = None
     candidates: list[DiagnosisCandidate] = field(default_factory=list)
@@ -168,7 +172,7 @@ class IntelligentDiagnosis:
     fault_findings: list[FaultFinding] = field(default_factory=list)
     active_sweep_plan: list[ActiveSweepStep] = field(default_factory=list)
     equivalent_transfer_function: EquivalentTransferFunction | None = None
-    component_deviation_report: ComponentDeviationReport | None = None
+    control_compensation_report: ControlCompensationReport | None = None
     needs_resweep_confirmation: bool = False
     decision_strategy: str = ""
 
@@ -694,12 +698,15 @@ def build_equivalent_transfer_function(fit: TransferModelFit) -> EquivalentTrans
                 f"w0={_format_coeff(w0)} rad/s, Q={q:.3g}"
             )
         else:
-            numerator = [gain, 0.0, gain * w0**2]
+            floor_db = fit.parameters.get("notch_floor_db")
+            floor_mag = 0.0
+            if floor_db is not None:
+                floor_mag = float(np.clip(10.0 ** (float(floor_db) / 20.0), 1.0e-6, 0.95))
+            numerator = [gain, gain * floor_mag * w0 / q, gain * w0**2]
             summary = (
                 f"K={_format_coeff(gain)}, f0={f0_hz:.3g} Hz, "
                 f"w0={_format_coeff(w0)} rad/s, Q={q:.3g}"
             )
-            floor_db = fit.parameters.get("notch_floor_db")
             if floor_db is not None:
                 summary += f", notch_floor={floor_db:.3g} dB"
         expression = f"H(s) = ({_format_polynomial(numerator)}) / ({_format_polynomial(denominator)})"
@@ -824,6 +831,29 @@ def _build_transfer_fit(
     )
 
 
+def _annotate_fit_sample_count(
+    fit: TransferModelFit | None,
+    used_count: int,
+    total_count: int,
+) -> TransferModelFit | None:
+    if fit is None or used_count >= total_count:
+        return fit
+    evidence = f"{fit.evidence}；传函拟合采用有效过渡带 {used_count}/{total_count} 点"
+    return TransferModelFit(
+        model_family=fit.model_family,
+        order=fit.order,
+        model_shape=fit.model_shape,
+        parameters=fit.parameters,
+        r_squared=fit.r_squared,
+        rmse_db=fit.rmse_db,
+        max_residual_db=fit.max_residual_db,
+        residual_summary=fit.residual_summary,
+        evidence=evidence,
+        success=fit.success,
+        transfer_function=fit.transfer_function,
+    )
+
+
 def _best_gain_for_shape(measured_db: np.ndarray, shape_db: np.ndarray) -> tuple[float, float]:
     finite = np.isfinite(measured_db) & np.isfinite(shape_db)
     if not np.any(finite):
@@ -831,6 +861,39 @@ def _best_gain_for_shape(measured_db: np.ndarray, shape_db: np.ndarray) -> tuple
     gain_db = float(np.mean(measured_db[finite] - shape_db[finite]))
     residual = gain_db + shape_db[finite] - measured_db[finite]
     return gain_db, float(np.sqrt(np.mean(residual**2)))
+
+
+def _low_high_transfer_fit_mask(
+    family: str,
+    order: int,
+    freq_hz: np.ndarray,
+    measured_db: np.ndarray,
+    features: DiagnosisFeatures,
+) -> np.ndarray:
+    """Keep the passband and transition region; reject the far noise floor for transfer fitting."""
+    finite = np.isfinite(freq_hz) & np.isfinite(measured_db) & (freq_hz > 0.0)
+    if family not in ("lowpass", "highpass") or np.count_nonzero(finite) < 12:
+        return finite
+
+    valid_db = measured_db[finite]
+    if len(valid_db) < 12:
+        return finite
+
+    peak_db = float(np.nanmax(valid_db))
+    floor_db = float(np.nanmin(valid_db))
+    drop_db = 36.0 if int(order) <= 1 else 16.0
+    floor_margin_db = 8.0 if int(order) <= 1 else 4.0
+    usable_floor_db = max(peak_db - drop_db, floor_db + floor_margin_db)
+    mask = finite & (measured_db >= usable_floor_db)
+
+    min_points = max(12, min(36, len(valid_db) // 3))
+    if np.count_nonzero(mask) < min_points:
+        relaxed_drop_db = 45.0 if int(order) <= 1 else 24.0
+        mask = finite & (measured_db >= peak_db - relaxed_drop_db)
+    if np.count_nonzero(mask) < 8:
+        return finite
+
+    return mask
 
 
 def _log_grid(low: float, high: float, count: int) -> np.ndarray:
@@ -975,18 +1038,25 @@ def _fit_one_model(
         return None
     freq_hz = freq_hz[finite]
     measured_db = measured_db[finite]
+    fit_mask = _low_high_transfer_fit_mask(family, order, freq_hz, measured_db, features)
+    if family in ("lowpass", "highpass") and np.count_nonzero(fit_mask) >= 8:
+        fit_freq_hz = freq_hz[fit_mask]
+        fit_measured_db = measured_db[fit_mask]
+    else:
+        fit_freq_hz = freq_hz
+        fit_measured_db = measured_db
 
     gain_guess = float(np.nanmax(measured_db))
     if family == "lowpass":
         gain_guess = features.low_gain_db
-        effective_fc_guess = _initial_cutoff_guess(family, features, freq_hz, measured_db)
+        effective_fc_guess = _initial_cutoff_guess(family, features, fit_freq_hz, fit_measured_db)
         pole_fc_guess = _low_high_pole_cutoff_hz(family, order, effective_fc_guess, model_shape)
         lower = np.array([features.min_gain_db - 20.0, max(features.freq_min_hz * 0.05, 0.1)])
         upper = np.array([features.max_gain_db + 20.0, features.freq_max_hz * 20.0])
         x0 = np.array([gain_guess, float(np.clip(pole_fc_guess, lower[1], upper[1]))], dtype=float)
     elif family == "highpass":
         gain_guess = features.high_gain_db
-        effective_fc_guess = _initial_cutoff_guess(family, features, freq_hz, measured_db)
+        effective_fc_guess = _initial_cutoff_guess(family, features, fit_freq_hz, fit_measured_db)
         pole_fc_guess = _low_high_pole_cutoff_hz(family, order, effective_fc_guess, model_shape)
         lower = np.array([features.min_gain_db - 20.0, max(features.freq_min_hz * 0.05, 0.1)])
         upper = np.array([features.max_gain_db + 20.0, features.freq_max_hz * 20.0])
@@ -1007,11 +1077,12 @@ def _fit_one_model(
         return None
 
     if not HAS_SCIPY_OPTIMIZE:
-        return _grid_fit_one_model(family, order, freq_hz, measured_db, features, model_shape)
+        fit = _grid_fit_one_model(family, order, fit_freq_hz, fit_measured_db, features, model_shape)
+        return _annotate_fit_sample_count(fit, len(fit_freq_hz), len(freq_hz))
 
     try:
         result = least_squares(
-            lambda p: _model_db_response(family, order, freq_hz, p, model_shape) - measured_db,
+            lambda p: _model_db_response(family, order, fit_freq_hz, p, model_shape) - fit_measured_db,
             x0=np.clip(x0, lower, upper),
             bounds=(lower, upper),
             x_scale=np.maximum(np.abs(x0), 1.0),
@@ -1021,9 +1092,19 @@ def _fit_one_model(
             max_nfev=1000,
         )
     except Exception:
-        return _grid_fit_one_model(family, order, freq_hz, measured_db, features, model_shape)
+        fit = _grid_fit_one_model(family, order, fit_freq_hz, fit_measured_db, features, model_shape)
+        return _annotate_fit_sample_count(fit, len(fit_freq_hz), len(freq_hz))
 
-    return _build_transfer_fit(family, order, result.x, freq_hz, measured_db, success=bool(result.success), model_shape=model_shape)
+    fit = _build_transfer_fit(
+        family,
+        order,
+        result.x,
+        fit_freq_hz,
+        fit_measured_db,
+        success=bool(result.success),
+        model_shape=model_shape,
+    )
+    return _annotate_fit_sample_count(fit, len(fit_freq_hz), len(freq_hz))
 
 
 def fit_transfer_templates(omega, magnitude, phase_rad=None) -> list[TransferModelFit]:
@@ -1451,6 +1532,231 @@ def _build_active_sweep_steps(
     return suggestions, steps[:3]
 
 
+def _count_points_in_hz_window(omega: Any, start_hz: float, stop_hz: float) -> int:
+    freq_hz = _as_float_array(omega) / (2.0 * math.pi)
+    if len(freq_hz) == 0:
+        return 0
+    lo = max(min(float(start_hz), float(stop_hz)), 0.0)
+    hi = max(float(start_hz), float(stop_hz))
+    if hi <= lo:
+        return 0
+    return int(np.count_nonzero(np.isfinite(freq_hz) & (freq_hz >= lo) & (freq_hz <= hi)))
+
+
+def _key_region_point_count(
+    omega: Any,
+    circuit_type: str,
+    cutoff_hz: float | None,
+    left_hz: float | None,
+    right_hz: float | None,
+) -> int | None:
+    if circuit_type in ("lowpass", "highpass") and cutoff_hz is not None and cutoff_hz > 0.0:
+        return _count_points_in_hz_window(omega, cutoff_hz * 0.60, cutoff_hz * 2.50)
+    if circuit_type in ("bandpass", "bandstop") and left_hz is not None and right_hz is not None:
+        left_count = _count_points_in_hz_window(omega, left_hz * 0.70, left_hz * 1.30)
+        right_count = _count_points_in_hz_window(omega, right_hz * 0.70, right_hz * 1.30)
+        return min(left_count, right_count)
+    return None
+
+
+def _frequency_inside_measured_range(features: DiagnosisFeatures, frequency_hz: float | None) -> bool:
+    if frequency_hz is None or not np.isfinite(frequency_hz) or frequency_hz <= 0.0:
+        return False
+    return features.freq_min_hz <= float(frequency_hz) <= features.freq_max_hz
+
+
+def _key_frequency_is_inside_measured_range(
+    features: DiagnosisFeatures,
+    circuit_type: str,
+    cutoff_hz: float | None,
+    left_hz: float | None,
+    right_hz: float | None,
+) -> bool:
+    if circuit_type in ("lowpass", "highpass"):
+        return _frequency_inside_measured_range(features, cutoff_hz)
+    if circuit_type in ("bandpass", "bandstop"):
+        return (
+            _frequency_inside_measured_range(features, left_hz)
+            and _frequency_inside_measured_range(features, right_hz)
+        )
+    return False
+
+
+def _resweep_decision(
+    omega: Any,
+    features: DiagnosisFeatures,
+    circuit_type: str,
+    confidence: float,
+    needs_resweep: bool,
+    best_fit: TransferModelFit | None,
+    fault_findings: list[FaultFinding],
+    cutoff_hz: float | None,
+    left_hz: float | None,
+    right_hz: float | None,
+) -> tuple[bool, list[str], bool]:
+    reasons: list[str] = []
+    key_inside_range = _key_frequency_is_inside_measured_range(
+        features,
+        circuit_type,
+        cutoff_hz,
+        left_hz,
+        right_hz,
+    )
+    key_out_of_range = circuit_type in ("lowpass", "highpass", "bandpass", "bandstop") and not key_inside_range
+
+    if circuit_type in ("unknown", "other"):
+        reasons.append("响应形态不够典型，需要扩大扫频范围确认类型")
+    if needs_resweep:
+        reasons.append("前两名候选置信度接近，需要补扫确认判型")
+    if features.point_count < 24:
+        reasons.append("有效频点偏少，建议补扫提高判据稳定性")
+    if features.sweep_range_decades < 1.2:
+        reasons.append("扫频范围过窄，建议扩大扫频范围")
+    if confidence < 0.85:
+        reasons.append(f"识别置信度 {confidence:.2f} 偏低，建议补扫确认")
+
+    if best_fit is None:
+        reasons.append("等效传函模板未稳定收敛，建议补扫后重新拟合")
+    else:
+        if best_fit.rmse_db > 1.5:
+            reasons.append(f"模型拟合 RMSE={best_fit.rmse_db:.2f} dB 偏大，建议加密关键频段")
+        elif best_fit.max_residual_db > 8.0:
+            reasons.append(f"模型最大残差={best_fit.max_residual_db:.2f} dB 偏大，建议复查异常频点")
+
+    key_count = _key_region_point_count(omega, circuit_type, cutoff_hz, left_hz, right_hz)
+    if key_inside_range and key_count is not None and key_count < 8:
+        reasons.append(f"关键频率附近只有 {key_count} 个点，建议加密补扫")
+    elif key_out_of_range:
+        if circuit_type in ("lowpass", "highpass") and cutoff_hz is not None:
+            reasons.append(
+                f"估计截止频率 {cutoff_hz:.0f} Hz 已超出当前扫频范围 "
+                f"{features.freq_min_hz:.0f}-{features.freq_max_hz:.0f} Hz，不能继续按该外推频点加密补扫"
+            )
+        else:
+            reasons.append("估计关键边界超出当前扫频范围，不能继续按外推频点加密补扫")
+
+    measurement_chain_faults = [
+        item for item in fault_findings if item.rule_id not in {"sweep_range_short", "valid_capture_low"}
+    ]
+    if measurement_chain_faults:
+        return (
+            False,
+            ["已发现测量链或硬件异常，先按故障证据修正后重新测量，暂不建议连续补扫。"],
+            False,
+        )
+
+    if reasons:
+        actionable = not key_out_of_range or circuit_type in ("unknown", "other")
+        if not actionable:
+            reasons.append("请先扩大总扫频范围覆盖真实截止点，或把当前频段作为局部已补扫结果验收。")
+        return True, _dedupe_texts(reasons), actionable
+    return (
+        False,
+        ["当前数据已覆盖主要特征频段，识别置信度和模型拟合质量较高，无需继续智能补扫。"],
+        False,
+    )
+
+
+def _dedupe_texts(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for item in items:
+        text = str(item).strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        deduped.append(text)
+    return deduped
+
+
+def _primary_key_frequency_hz(
+    circuit_type: str,
+    cutoff_hz: float | None,
+    center_hz: float | None,
+) -> float | None:
+    if circuit_type in ("lowpass", "highpass"):
+        return cutoff_hz
+    if circuit_type in ("bandpass", "bandstop"):
+        return center_hz
+    return None
+
+
+def _practical_conclusion_and_experiments(
+    features: DiagnosisFeatures,
+    circuit_type: str,
+    order_estimate: int,
+    confidence: float,
+    best_fit: TransferModelFit | None,
+    fault_findings: list[FaultFinding],
+    cutoff_hz: float | None,
+    center_hz: float | None,
+    left_hz: float | None,
+    right_hz: float | None,
+    active_sweep_plan: list[ActiveSweepStep],
+    measurement_suggestions: list[str],
+    control_suggestions: list[str],
+) -> tuple[str, list[str]]:
+    label = _system_label(circuit_type, int(order_estimate))
+    key_hz = _primary_key_frequency_hz(circuit_type, cutoff_hz, center_hz)
+    key_inside = _key_frequency_is_inside_measured_range(features, circuit_type, cutoff_hz, left_hz, right_hz)
+
+    if fault_findings:
+        first = fault_findings[0]
+        conclusion = (
+            f"当前更像测量链问题优先：已触发 {first.name}，先修正该问题再判断 {label} 是否成立。"
+        )
+    elif circuit_type in ("unknown", "other"):
+        conclusion = "当前频响形态不够典型，AI 不能可靠归类；这组数据适合作为“需要扩大扫频范围”的演示。"
+    elif key_hz is not None and not key_inside:
+        conclusion = (
+            f"当前数据只能证明被测对象在 {features.freq_min_hz:.0f}-{features.freq_max_hz:.0f} Hz "
+            f"范围内呈现{CIRCUIT_TYPE_LABELS.get(circuit_type, '')}趋势；估计关键频率约 {_format_hz(key_hz)}，"
+            "已经超出本次扫频范围，不能把等效传函当最终模型。"
+        )
+    elif best_fit is not None and best_fit.rmse_db <= 1.0 and confidence >= 0.90:
+        if key_hz is not None:
+            conclusion = f"当前数据可作为 {label} 的稳定演示样本，关键频率约 {_format_hz(key_hz)}，等效传函可信度较高。"
+        else:
+            conclusion = f"当前数据可作为 {label} 的稳定演示样本，等效传函可信度较高。"
+    elif best_fit is not None and best_fit.rmse_db > 2.0:
+        conclusion = (
+            f"AI 可以判断它更像 {label}，但模板拟合误差 {best_fit.rmse_db:.2f} dB 偏大；"
+            "这组数据适合展示“AI 发现模型不够可信并要求补扫/扩展扫频”。"
+        )
+    else:
+        conclusion = f"AI 当前判断为 {label}，可用于展示识别结果；若要作为最终传函，建议结合补扫或重复测量确认。"
+
+    experiments: list[str] = []
+    if active_sweep_plan:
+        experiments.append(f"下一步直接点“一键智能补扫”，执行 {active_sweep_plan[0].command}。")
+    elif key_hz is not None and not key_inside:
+        stop_hz = _nice_step_hz(max(features.freq_max_hz * 5.0, key_hz * 1.3))
+        start_hz = _nice_step_hz(max(1.0, features.freq_min_hz))
+        step_hz = _nice_step_hz(max((stop_hz - start_hz) / 180.0, 10.0))
+        experiments.append(
+            f"若要确认真实截止点，把总扫频扩到 {start_hz:g}-{stop_hz:g} Hz，步进约 {step_hz:g} Hz。"
+        )
+    else:
+        experiments.append("当前测量已经能支撑识别展示；无需为了同一结论继续补扫。")
+
+    if circuit_type in ("lowpass", "highpass") and key_hz is not None:
+        experiments.append(
+            "若要演示 AI 的实用性，换 RC 值做对照：R 或 C 增大 2 倍，理论截止频率约减半；"
+            "R 或 C 减小 2 倍，理论截止频率约翻倍。"
+        )
+    elif circuit_type in ("bandpass", "bandstop") and center_hz is not None:
+        experiments.append(
+            "若要演示中心频率移动，同时改变等效 R 或 C：RC 乘积增大时中心频率降低，RC 乘积减小时中心频率升高。"
+        )
+
+    if control_suggestions:
+        experiments.append("若演示自动控制校正，先按“控制校正建议”填写目标穿越 Hz，再重新导入同一组数据生成 K 或 Gc(s)。")
+    elif circuit_type in ("lowpass", "highpass"):
+        experiments.append("若只演示滤波器识别，保持自动控制校正页关闭或不讲控制段，避免把滤波器验收和开环控制混在一起。")
+
+    return conclusion, _dedupe_texts(experiments[:5])
+
+
 def _quality_summary(features: DiagnosisFeatures, circuit_type: str) -> list[str]:
     quality = ["无削顶" if features.clipped_points == 0 else f"削顶频点 {features.clipped_points} 个"]
     if features.input_rms_median_v is not None:
@@ -1509,7 +1815,7 @@ def run_intelligent_diagnosis(
     phase_rad,
     diagnostics: dict[str, np.ndarray] | None = None,
     analysis_result: Any | None = None,
-    component_profile: Any | None = None,
+    control_compensation_settings: Any | None = None,
 ) -> IntelligentDiagnosis:
     features = extract_diagnosis_features(omega, magnitude, phase_rad, diagnostics)
     model_fits = fit_transfer_templates(omega, magnitude, phase_rad)
@@ -1533,38 +1839,87 @@ def run_intelligent_diagnosis(
         analysis_result,
         best_fit,
     )
-    suggestions, sweep_steps = _build_active_sweep_steps(features, circuit_type, cutoff_hz, center_hz, left_hz, right_hz)
-    if needs_resweep:
-        suggestions.insert(0, "前两名候选置信度接近，建议执行智能补扫确认。")
+    resweep_needed, resweep_reasons, actionable_resweep = _resweep_decision(
+        omega,
+        features,
+        circuit_type,
+        confidence,
+        needs_resweep,
+        best_fit,
+        fault_findings,
+        cutoff_hz,
+        left_hz,
+        right_hz,
+    )
+    measurement_suggestions = list(resweep_reasons)
+    sweep_steps: list[ActiveSweepStep] = []
+    if resweep_needed and actionable_resweep:
+        sweep_suggestions, sweep_steps = _build_active_sweep_steps(
+            features,
+            circuit_type,
+            cutoff_hz,
+            center_hz,
+            left_hz,
+            right_hz,
+        )
+        measurement_suggestions.extend(sweep_suggestions)
     if features.point_count < 12:
-        suggestions.insert(0, "有效频点偏少，建议至少采集 12 个以上频点再用于竞赛展示判据。")
+        measurement_suggestions.insert(0, "有效频点偏少，建议至少采集 12 个以上频点再用于竞赛展示判据。")
         confidence = min(confidence, 0.45)
 
     possible_faults = [f"{item.name}: {item.suggestion}" for item in fault_findings]
     if not possible_faults:
-        possible_faults = ["暂未发现明显硬件故障，优先按关键频率附近补扫确认。"]
+        if resweep_needed:
+            possible_faults = ["暂未发现明显硬件故障；本次补扫建议主要用于提高识别/拟合可信度。"]
+        else:
+            possible_faults = ["暂未发现明显硬件故障，当前数据可直接用于报告展示。"]
 
-    component_report = None
-    if component_profile is not None:
+    control_report = None
+    control_suggestions: list[str] = []
+    if control_compensation_settings is not None:
         try:
-            component_report = diagnose_component_deviation(omega, magnitude, phase_rad, component_profile)
-            if component_report.enabled and component_report.has_significant_deviation:
-                possible_faults.insert(0, component_report.summary)
-                suggestions.insert(0, component_report.candidates[0].suggestion)
-                confidence = min(confidence, 0.92)
-            elif component_report.enabled and component_report.notes:
-                suggestions.extend(component_report.notes[:2])
+            control_report = build_control_compensation_report(
+                omega,
+                magnitude,
+                phase_rad,
+                settings=control_compensation_settings,
+                analysis_result=analysis_result,
+            )
+            if control_report.enabled:
+                best_control = control_report.best_candidate
+                control_suggestions.append(control_report.summary)
+                if best_control is not None and best_control.kind not in ("none", ""):
+                    possible_faults.insert(0, f"控制指标未满足: {best_control.suggestion}")
+                    control_suggestions.append(best_control.suggestion)
+                elif best_control is not None and best_control.suggestion:
+                    control_suggestions.append(best_control.suggestion)
         except Exception as exc:
-            component_report = ComponentDeviationReport(
+            control_report = ControlCompensationReport(
                 enabled=True,
-                circuit_label=getattr(component_profile, "circuit_label", "Auto"),
-                circuit_type=getattr(component_profile, "circuit_type", "unknown"),
-                order=int(getattr(component_profile, "order", 0) or 0),
-                baseline_rmse_db=None,
-                best_rmse_db=None,
-                summary=f"元件偏差诊断失败: {exc}",
+                settings=control_compensation_settings,
+                current_margins=None,
+                compensated_margins=None,
+                summary=f"自动控制校正计算失败: {exc}",
                 notes=[str(exc)],
             )
+            control_suggestions.append(f"自动控制校正计算失败: {exc}")
+
+    suggestions = _dedupe_texts(control_suggestions + measurement_suggestions)
+    practical_conclusion, experiment_recommendations = _practical_conclusion_and_experiments(
+        features,
+        circuit_type,
+        order_estimate,
+        confidence,
+        best_fit,
+        fault_findings,
+        cutoff_hz,
+        center_hz,
+        left_hz,
+        right_hz,
+        sweep_steps,
+        measurement_suggestions,
+        control_suggestions,
+    )
 
     circuit_label = CIRCUIT_TYPE_LABELS.get(circuit_type, "未知")
     return IntelligentDiagnosis(
@@ -1578,10 +1933,14 @@ def run_intelligent_diagnosis(
         left_cutoff_hz=left_hz,
         right_cutoff_hz=right_hz,
         confidence=confidence,
-        measurement_health=_measurement_health_summary(features, confidence, fault_findings, needs_resweep),
+        measurement_health=_measurement_health_summary(features, confidence, fault_findings, resweep_needed),
         measurement_quality=_quality_summary(features, circuit_type),
         possible_faults=possible_faults,
         next_test_suggestions=suggestions,
+        measurement_suggestions=measurement_suggestions,
+        control_suggestions=control_suggestions,
+        practical_conclusion=practical_conclusion,
+        experiment_recommendations=experiment_recommendations,
         adaptive_sweep_commands=[step.command for step in sweep_steps],
         features=features,
         candidates=candidates,
@@ -1590,8 +1949,8 @@ def run_intelligent_diagnosis(
         fault_findings=fault_findings,
         active_sweep_plan=sweep_steps,
         equivalent_transfer_function=best_fit.transfer_function if best_fit is not None else None,
-        component_deviation_report=component_report,
-        needs_resweep_confirmation=needs_resweep,
+        control_compensation_report=control_report,
+        needs_resweep_confirmation=resweep_needed,
         decision_strategy=decision_strategy,
     )
 
@@ -1658,7 +2017,7 @@ def format_ai_diagnosis_report_lines(diagnosis: IntelligentDiagnosis) -> list[st
     else:
         lines.append("模型拟合: 数据点不足或模板未收敛，已退回到特征规则诊断。")
 
-    lines.extend(format_component_report_lines(diagnosis.component_deviation_report))
+    lines.extend(format_control_compensation_report_lines(diagnosis.control_compensation_report))
 
     lines.extend(
         [
@@ -1671,6 +2030,10 @@ def format_ai_diagnosis_report_lines(diagnosis: IntelligentDiagnosis) -> list[st
                 else "暂未触发故障知识库规则"
             ),
             "可能故障原因: " + "；".join(diagnosis.possible_faults),
+            "AI实用结论: " + (diagnosis.practical_conclusion or "暂无"),
+            "建议实验动作: " + "；".join(diagnosis.experiment_recommendations or ["暂无"]),
+            "测量补扫建议: " + "；".join(diagnosis.measurement_suggestions or ["暂无"]),
+            "控制校正建议: " + "；".join(diagnosis.control_suggestions or ["暂无"]),
             "下一步测试建议: " + "；".join(diagnosis.next_test_suggestions),
         ]
     )

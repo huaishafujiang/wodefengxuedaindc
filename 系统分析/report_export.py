@@ -10,6 +10,7 @@ import numpy as np
 from ai_diagnosis import transfer_fit_reliability_text
 from diagnosis_view import structured_diagnosis_sections
 from filter_analysis import build_filter_report_lines
+from transfer_formula import build_transfer_formula_view, formula_css, formula_html, save_formula_png
 
 
 def _fmt(value: Any, digits: int = 6) -> str:
@@ -109,21 +110,33 @@ def _write_diagnostics_csv(path: Path, session: Any) -> None:
                     getattr(finding, "suggestion", ""),
                 ]
             )
-        component_report = getattr(diagnosis, "component_deviation_report", None)
-        if component_report is not None and getattr(component_report, "enabled", False):
-            writer.writerow(["component", "summary", getattr(component_report, "summary", ""), "", ""])
-            for candidate in getattr(component_report, "candidates", []) or []:
+        control_report = getattr(session, "control_compensation_report", None)
+        if control_report is None:
+            control_report = getattr(diagnosis, "control_compensation_report", None)
+        if control_report is not None and getattr(control_report, "enabled", False):
+            writer.writerow(["control_compensation", "summary", getattr(control_report, "summary", ""), "", ""])
+            for candidate in getattr(control_report, "candidates", []) or []:
                 writer.writerow(
                     [
-                        "component",
-                        getattr(candidate, "component", ""),
+                        "control_compensation",
+                        getattr(candidate, "label", ""),
                         _fmt(getattr(candidate, "confidence", None), 4),
                         getattr(candidate, "evidence", ""),
                         getattr(candidate, "suggestion", ""),
                     ]
                 )
-        for suggestion in getattr(diagnosis, "next_test_suggestions", []) or []:
-            writer.writerow(["suggestion", "", suggestion, "", ""])
+        conclusion = getattr(diagnosis, "practical_conclusion", "")
+        if conclusion:
+            writer.writerow(["ai_practical", "conclusion", conclusion, "", ""])
+        for suggestion in getattr(diagnosis, "experiment_recommendations", []) or []:
+            writer.writerow(["experiment_recommendation", "", suggestion, "", ""])
+        for suggestion in getattr(diagnosis, "measurement_suggestions", []) or []:
+            writer.writerow(["measurement_suggestion", "", suggestion, "", ""])
+        for suggestion in getattr(diagnosis, "control_suggestions", []) or []:
+            writer.writerow(["control_suggestion", "", suggestion, "", ""])
+        if not getattr(diagnosis, "measurement_suggestions", None) and not getattr(diagnosis, "control_suggestions", None):
+            for suggestion in getattr(diagnosis, "next_test_suggestions", []) or []:
+                writer.writerow(["suggestion", "", suggestion, "", ""])
 
 
 def _kv_rows(items: list[tuple[str, Any]]) -> str:
@@ -156,6 +169,9 @@ def export_html_report(session: Any, figure: Any, output_dir: str | Path) -> Pat
     report_lines = session.report_lines or build_filter_report_lines(result)
     tf = getattr(diagnosis, "equivalent_transfer_function", None) if diagnosis is not None else None
     best_fit = getattr(diagnosis, "best_fit", None) if diagnosis is not None else None
+    formula_view = build_transfer_formula_view(session)
+    formula_path = out_dir / "transfer_formula.png"
+    formula_image_saved = save_formula_png(formula_view, formula_path)
 
     sweep_items = [
         ("时间", session.created_at.strftime("%Y-%m-%d %H:%M:%S")),
@@ -192,6 +208,14 @@ def export_html_report(session: Any, figure: Any, output_dir: str | Path) -> Pat
     diagnosis_rows = _kv_rows(list(sections.items()))
     notes_html = html.escape(session.remark or "无").replace("\n", "<br>")
     report_html = "<br>".join(html.escape(line) for line in report_lines)
+    formula_block = formula_html(formula_view)
+    if formula_image_saved:
+        formula_block = formula_block.replace(
+            '<div class="formula-display">',
+            '<div><img class="formula-image" src="transfer_formula.png" alt="Equivalent transfer function formula"></div>'
+            '<div class="formula-display">',
+            1,
+        )
 
     html_text = f"""<!doctype html>
 <html lang="zh-CN">
@@ -208,25 +232,45 @@ def export_html_report(session: Any, figure: Any, output_dir: str | Path) -> Pat
     img {{ max-width: 100%; border: 1px solid #e5e7eb; }}
     pre {{ white-space: pre-wrap; background: #f8fafc; border: 1px solid #e5e7eb; padding: 12px; }}
     .muted {{ color: #64748b; }}
+    .module-grid {{ display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin: 16px 0 20px; }}
+    .module-card {{ border: 1px solid #d7dee8; border-radius: 10px; padding: 14px; background: #ffffff; }}
+    .module-card h3 {{ font-size: 14px; margin: 0 0 8px; }}
+    .module-card p {{ margin: 0; color: #334155; line-height: 1.58; }}
+    @media (max-width: 900px) {{ .module-grid {{ grid-template-columns: 1fr; }} }}
+    {formula_css()}
   </style>
 </head>
 <body>
   <h1>频响测量报告</h1>
   <div class="muted">导出时间：{html.escape(session.created_at.strftime('%Y-%m-%d %H:%M:%S'))}</div>
 
-  <h2>扫频参数</h2>
+  <div class="module-grid">
+    <section class="module-card">
+      <h3>模块 1：扫频参数</h3>
+      <p>记录本次串口、命令、频率范围和点数，方便复现实测条件。</p>
+    </section>
+    <section class="module-card">
+      <h3>模块 2：识别结论</h3>
+      <p>汇总滤波器族、阶次、关键频率、置信度和期望电路匹配状态。</p>
+    </section>
+    <section class="module-card">
+      <h3>模块 3：等效传函</h3>
+      <p>把 AI 拟合模型拆成可阅读公式、参数和可信度说明，不再只给文本串。</p>
+    </section>
+  </div>
+
+  <h2>模块 1：扫频参数</h2>
   <table>{_kv_rows(sweep_items)}</table>
 
-  <h2>识别结果与关键频率</h2>
+  <h2>模块 2：识别结果与结构化诊断</h2>
   <table>{_kv_rows(result_items)}</table>
-
-  <h2>结构化诊断</h2>
   <table>{diagnosis_rows}</table>
 
-  <h2>传递函数</h2>
+  <h2>模块 3：等效传递函数公式</h2>
+  {formula_block}
   <table>{_kv_rows(tf_items) if tf_items else '<tr><td>暂无等效传递函数</td></tr>'}</table>
 
-  <h2>测量质量、故障建议与报告行</h2>
+  <h2>测量质量、故障建议与原始报告行</h2>
   <pre>{report_html}</pre>
 
   <h2>备注</h2>
@@ -240,6 +284,7 @@ def export_html_report(session: Any, figure: Any, output_dir: str | Path) -> Pat
     <li><a href="raw_data.csv">raw_data.csv</a></li>
     <li><a href="diagnostics.csv">diagnostics.csv</a></li>
     <li><a href="bode_nyquist.png">bode_nyquist.png</a></li>
+    {"<li><a href=\"transfer_formula.png\">transfer_formula.png</a></li>" if formula_image_saved else ""}
   </ul>
 </body>
 </html>

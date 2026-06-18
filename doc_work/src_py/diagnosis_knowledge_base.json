@@ -1,0 +1,104 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "pa0_clip",
+      "name": "PA0输入参考削顶",
+      "severity": "critical",
+      "condition": "input_clip_points > 0",
+      "evidence": "PA0削顶频点 {input_clip_points} 个，输入参考通道已经触碰ADC边界。",
+      "suggestion": "降低DAC幅值，检查PA0参考点是否接在DAC输出/被测输入同一点，并确认偏置在ADC中间区。",
+      "confidence_penalty": 0.16
+    },
+    {
+      "id": "pa1_clip",
+      "name": "PA1输出响应削顶",
+      "severity": "critical",
+      "condition": "output_clip_points > 0",
+      "evidence": "PA1削顶频点 {output_clip_points} 个，输出响应通道已经触碰ADC边界。",
+      "suggestion": "降低激励幅值，检查运放供电范围、输出摆幅和PA1输出节点偏置。",
+      "confidence_penalty": 0.18
+    },
+    {
+      "id": "pa1_bias_rail",
+      "name": "PA1偏置接近ADC边界",
+      "severity": "critical",
+      "condition": "output_dc_median_v is not None and (output_dc_median_v < 0.35 or output_dc_median_v > 2.95)",
+      "evidence": "PA1 DC约 {output_dc_median_v:.3f} V，明显偏离STM32 ADC安全中间区。",
+      "suggestion": "将输出节点偏置调整到约1.65 V，再降低幅值复测，避免半波削顶和相位异常。",
+      "confidence_penalty": 0.16
+    },
+    {
+      "id": "pa1_bias_hp_bp",
+      "name": "高通/带通输出偏置异常",
+      "severity": "warning",
+      "condition": "circuit_type in ('highpass', 'bandpass') and output_dc_median_v is not None and abs(output_dc_median_v - bias_center_v) > 0.45",
+      "evidence": "当前识别为{circuit_type}，PA1 DC约 {output_dc_median_v:.3f} V，偏离1.65 V较多。",
+      "suggestion": "检查高通/带通输出耦合后的中点偏置电阻，优先把PA1静态电平调到1.65 V附近。",
+      "confidence_penalty": 0.10
+    },
+    {
+      "id": "input_rms_low",
+      "name": "输入参考RMS过低",
+      "severity": "warning",
+      "condition": "input_rms_median_v is not None and input_rms_median_v < low_input_rms_v",
+      "evidence": "输入RMS中位数 {input_rms_median_v:.4f} V，低于可靠参考阈值 {low_input_rms_v:.3f} V。",
+      "suggestion": "提高激励幅值或检查PA0接线，否则幅值比和相位会明显受噪声影响。",
+      "confidence_penalty": 0.12
+    },
+    {
+      "id": "output_noise_floor",
+      "name": "输出接近噪声底",
+      "severity": "warning",
+      "condition": "output_rms_median_v is not None and output_rms_median_v < noise_floor_rms_v",
+      "evidence": "输出RMS中位数 {output_rms_median_v:.4f} V，接近噪声底 {noise_floor_rms_v:.3f} V。",
+      "suggestion": "提高激励幅值或缩小阻带点在阶次估计中的权重，重点参考转折区数据。",
+      "confidence_penalty": 0.12
+    },
+    {
+      "id": "swap_io_suspected",
+      "name": "PA0/PA1疑似接反或有源增益异常",
+      "severity": "warning",
+      "condition": "max_gain_db > 6.0",
+      "evidence": "最大通带增益 {max_gain_db:.1f} dB，超过无源RC网络常见范围。",
+      "suggestion": "若被测对象是无源网络，请检查PA0输入参考和PA1输出响应是否接反；若是有源电路，请确认运放增益设置。",
+      "confidence_penalty": 0.08
+    },
+    {
+      "id": "sweep_range_short",
+      "name": "扫频范围不足",
+      "severity": "info",
+      "condition": "sweep_range_decades < 1.2 or point_count < 12",
+      "evidence": "当前扫频跨度 {sweep_range_decades:.2f} decade，频点数 {point_count}。",
+      "suggestion": "扩大扫频范围并降低步进，至少覆盖关键频率前后各约半个数量级。",
+      "confidence_penalty": 0.06
+    },
+    {
+      "id": "valid_capture_low",
+      "name": "有效采集次数不足",
+      "severity": "warning",
+      "condition": "min_valid_capture_count is not None and min_valid_capture_count < 2",
+      "evidence": "最少有效采集次数 {min_valid_capture_count}，部分频点抗噪不足。",
+      "suggestion": "降低步进或延长单点采集，必要时重复扫频后合并数据。",
+      "confidence_penalty": 0.08
+    },
+    {
+      "id": "bandstop_noise_floor",
+      "name": "阻带/陷波深度受噪声底限制",
+      "severity": "info",
+      "condition": "circuit_type == 'bandstop' and notch_margin_db > 20.0 and output_rms_median_v is not None and output_rms_median_v < 0.08",
+      "evidence": "带阻陷波深度约 {notch_margin_db:.1f} dB，输出RMS中位数 {output_rms_median_v:.4f} V。",
+      "suggestion": "在陷波中心附近加密扫频，并提高输入幅值验证真实陷波深度。",
+      "confidence_penalty": 0.04
+    },
+    {
+      "id": "high_frequency_parasitic",
+      "name": "高频寄生影响疑似存在",
+      "severity": "info",
+      "condition": "circuit_type in ('highpass', 'bandpass') and high_gain_db < max_gain_db - 6.0",
+      "evidence": "高频端增益 {high_gain_db:.1f} dB，相比峰值 {max_gain_db:.1f} dB 已下降超过6 dB。",
+      "suggestion": "检查面包板寄生电容、运放GBW和高频端接线长度，必要时降低最高扫频点或更换高速运放。",
+      "confidence_penalty": 0.05
+    }
+  ]
+}
