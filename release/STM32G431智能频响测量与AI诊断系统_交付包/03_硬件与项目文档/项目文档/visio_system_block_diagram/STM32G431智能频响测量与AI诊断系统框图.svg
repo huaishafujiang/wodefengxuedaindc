@@ -1,0 +1,103 @@
+<svg xmlns='http://www.w3.org/2000/svg' width='1522' height='856' viewBox='0 0 1522 856'>
+<defs><filter id='shadow' x='-20%' y='-20%' width='140%' height='140%'><feDropShadow dx='3' dy='4' stdDeviation='3' flood-color='#b8c2d0' flood-opacity='.45'/></filter><marker id='arrow' markerWidth='10' markerHeight='8' refX='9' refY='4' orient='auto'><path d='M0,0 L10,4 L0,8 z' fill='#8794a8'/></marker></defs>
+<rect x='0' y='0' width='1522' height='856' fill='#f6f8fb'/>
+<rect x='50.6' y='93.8' width='1420.5' height='695.5' rx='16' fill='#ffffff' stroke='#e8edf4' filter='url(#shadow)'/>
+<text x='53.4' y='27.6' fill='#172033' font-size='23' font-weight='700' text-anchor='start' font-family='Microsoft YaHei, SimHei, Arial'>STM32G431 智能频响测量与 AI 诊断系统框图</text>
+<text x='1462.8' y='33.1' fill='#667085' font-size='9' font-weight='400' text-anchor='end' font-family='Microsoft YaHei, SimHei, Arial'>硬件扫频采集、三数组协议、上位机频响分析、AI诊断与控制校正闭环</text>
+<rect x='66.2' y='125.1' width='1389.2' height='5.5' rx='4' fill='#1f4e79'/>
+<rect x='75.4' y='183.1' width='1370.8' height='217.1' rx='13' fill='#eef6ff' stroke='#1f4e79' opacity='.88'/>
+<text x='90.2' y='196.0' fill='#1f4e79' font-size='10' font-weight='700' text-anchor='start' font-family='Microsoft YaHei, SimHei, Arial'>主信号链路</text>
+<rect x='75.4' y='498.6' width='1370.8' height='171.1' rx='13' fill='#f0fbf6' stroke='#00a884' opacity='.88'/>
+<text x='90.2' y='511.5' fill='#00a884' font-size='10' font-weight='700' text-anchor='start' font-family='Microsoft YaHei, SimHei, Arial'>关键能力支撑</text>
+<line x1='281.5' y1='292.6' x2='318.3' y2='292.6' stroke='#8794a8' stroke-width='1.5' marker-end='url(#arrow)'/>
+<text x='299.9' y='287.6' fill='#475569' font-size='8' font-weight='400' text-anchor='middle' font-family='Microsoft YaHei, SimHei, Arial'>信号接入</text>
+<line x1='507.8' y1='292.6' x2='544.6' y2='292.6' stroke='#8794a8' stroke-width='1.5' marker-end='url(#arrow)'/>
+<text x='526.2' y='287.6' fill='#475569' font-size='8' font-weight='400' text-anchor='middle' font-family='Microsoft YaHei, SimHei, Arial'>三数组帧</text>
+<line x1='734.2' y1='292.6' x2='771.0' y2='292.6' stroke='#8794a8' stroke-width='1.5' marker-end='url(#arrow)'/>
+<text x='752.6' y='287.6' fill='#475569' font-size='8' font-weight='400' text-anchor='middle' font-family='Microsoft YaHei, SimHei, Arial'>串口读取</text>
+<line x1='960.5' y1='292.6' x2='997.3' y2='292.6' stroke='#8794a8' stroke-width='1.5' marker-end='url(#arrow)'/>
+<text x='978.9' y='287.6' fill='#475569' font-size='8' font-weight='400' text-anchor='middle' font-family='Microsoft YaHei, SimHei, Arial'>分析结果</text>
+<line x1='1186.8' y1='292.6' x2='1223.6' y2='292.6' stroke='#8794a8' stroke-width='1.5' marker-end='url(#arrow)'/>
+<text x='1205.2' y='287.6' fill='#475569' font-size='8' font-weight='400' text-anchor='middle' font-family='Microsoft YaHei, SimHei, Arial'>结论/参数</text>
+<line x1='1318.4' y1='239.2' x2='1318.4' y2='208.8' stroke='#2f9e44' stroke-width='1.1' stroke-dasharray='7,6'/>
+<line x1='1318.4' y1='208.8' x2='413.1' y2='208.8' stroke='#2f9e44' stroke-width='1.1' stroke-dasharray='7,6'/>
+<text x='865.7' y='203.8' fill='#475569' font-size='8' font-weight='400' text-anchor='middle' font-family='Microsoft YaHei, SimHei, Arial'>低置信度触发补扫</text>
+<line x1='413.1' y1='208.8' x2='413.1' y2='239.2' stroke='#2f9e44' stroke-width='1.1' stroke-dasharray='7,6' marker-end='url(#arrow)'/>
+<text x='413.1' y='219.0' fill='#475569' font-size='8' font-weight='400' text-anchor='middle' font-family='Microsoft YaHei, SimHei, Arial'>SWEEP</text>
+<rect x='92.0' y='239.2' width='189.5' height='106.7' rx='10' fill='#ffffff' stroke='#d8e0ea' filter='url(#shadow)'/>
+<rect x='92.0' y='239.2' width='189.5' height='7.4' rx='10' fill='#2f9e44'/>
+<circle cx='116.0' cy='273.2' r='14' fill='#2f9e44'/>
+<text x='116.0' y='277.2' fill='#fff' font-size='8' font-weight='700' text-anchor='middle' font-family='Microsoft YaHei, SimHei, Arial'>01</text>
+<text x='194.8' y='271.2' fill='#172033' font-size='10' font-weight='700' text-anchor='middle' font-family='Microsoft YaHei, SimHei, Arial'>被测电路</text>
+<text x='194.8' y='286.2' fill='#667085' font-size='8' font-weight='400' text-anchor='middle' font-family='Microsoft YaHei, SimHei, Arial'>滤波器 / DUT</text>
+<text x='194.8' y='299.2' fill='#667085' font-size='8' font-weight='400' text-anchor='middle' font-family='Microsoft YaHei, SimHei, Arial'>输入、输出接入</text>
+<rect x='318.3' y='239.2' width='189.5' height='106.7' rx='10' fill='#ffffff' stroke='#d8e0ea' filter='url(#shadow)'/>
+<rect x='318.3' y='239.2' width='189.5' height='7.4' rx='10' fill='#2f80ed'/>
+<circle cx='342.3' cy='273.2' r='14' fill='#2f80ed'/>
+<text x='342.3' y='277.2' fill='#fff' font-size='8' font-weight='700' text-anchor='middle' font-family='Microsoft YaHei, SimHei, Arial'>02</text>
+<text x='421.1' y='271.2' fill='#172033' font-size='10' font-weight='700' text-anchor='middle' font-family='Microsoft YaHei, SimHei, Arial'>STM32G431 测量</text>
+<text x='421.1' y='286.2' fill='#667085' font-size='8' font-weight='400' text-anchor='middle' font-family='Microsoft YaHei, SimHei, Arial'>DAC 激励</text>
+<text x='421.1' y='299.2' fill='#667085' font-size='8' font-weight='400' text-anchor='middle' font-family='Microsoft YaHei, SimHei, Arial'>ADC 采样 + FFT</text>
+<rect x='544.6' y='239.2' width='189.5' height='106.7' rx='10' fill='#ffffff' stroke='#d8e0ea' filter='url(#shadow)'/>
+<rect x='544.6' y='239.2' width='189.5' height='7.4' rx='10' fill='#d08a1d'/>
+<circle cx='568.6' cy='273.2' r='14' fill='#d08a1d'/>
+<text x='568.6' y='277.2' fill='#fff' font-size='8' font-weight='700' text-anchor='middle' font-family='Microsoft YaHei, SimHei, Arial'>03</text>
+<text x='647.4' y='271.2' fill='#172033' font-size='10' font-weight='700' text-anchor='middle' font-family='Microsoft YaHei, SimHei, Arial'>三数组串口协议</text>
+<text x='647.4' y='286.2' fill='#667085' font-size='8' font-weight='400' text-anchor='middle' font-family='Microsoft YaHei, SimHei, Arial'>omega</text>
+<text x='647.4' y='299.2' fill='#667085' font-size='8' font-weight='400' text-anchor='middle' font-family='Microsoft YaHei, SimHei, Arial'>Magnitude_data / Phase_data_rad</text>
+<rect x='771.0' y='239.2' width='189.5' height='106.7' rx='10' fill='#ffffff' stroke='#d8e0ea' filter='url(#shadow)'/>
+<rect x='771.0' y='239.2' width='189.5' height='7.4' rx='10' fill='#1592a6'/>
+<circle cx='795.0' cy='273.2' r='14' fill='#1592a6'/>
+<text x='795.0' y='277.2' fill='#fff' font-size='8' font-weight='700' text-anchor='middle' font-family='Microsoft YaHei, SimHei, Arial'>04</text>
+<text x='873.7' y='271.2' fill='#172033' font-size='10' font-weight='700' text-anchor='middle' font-family='Microsoft YaHei, SimHei, Arial'>上位机分析</text>
+<text x='873.7' y='286.2' fill='#667085' font-size='8' font-weight='400' text-anchor='middle' font-family='Microsoft YaHei, SimHei, Arial'>Bode / Nyquist</text>
+<text x='873.7' y='299.2' fill='#667085' font-size='8' font-weight='400' text-anchor='middle' font-family='Microsoft YaHei, SimHei, Arial'>稳定性与类型识别</text>
+<rect x='997.3' y='239.2' width='189.5' height='106.7' rx='10' fill='#ffffff' stroke='#d8e0ea' filter='url(#shadow)'/>
+<rect x='997.3' y='239.2' width='189.5' height='7.4' rx='10' fill='#7a5cff'/>
+<circle cx='1021.3' cy='273.2' r='14' fill='#7a5cff'/>
+<text x='1021.3' y='277.2' fill='#fff' font-size='8' font-weight='700' text-anchor='middle' font-family='Microsoft YaHei, SimHei, Arial'>05</text>
+<text x='1100.0' y='271.2' fill='#172033' font-size='10' font-weight='700' text-anchor='middle' font-family='Microsoft YaHei, SimHei, Arial'>AI 诊断校正</text>
+<text x='1100.0' y='286.2' fill='#667085' font-size='8' font-weight='400' text-anchor='middle' font-family='Microsoft YaHei, SimHei, Arial'>故障候选排序</text>
+<text x='1100.0' y='299.2' fill='#667085' font-size='8' font-weight='400' text-anchor='middle' font-family='Microsoft YaHei, SimHei, Arial'>PM/GM 补偿</text>
+<rect x='1223.6' y='239.2' width='189.5' height='106.7' rx='10' fill='#ffffff' stroke='#d8e0ea' filter='url(#shadow)'/>
+<rect x='1223.6' y='239.2' width='189.5' height='7.4' rx='10' fill='#2f9e44'/>
+<circle cx='1247.6' cy='273.2' r='14' fill='#2f9e44'/>
+<text x='1247.6' y='277.2' fill='#fff' font-size='8' font-weight='700' text-anchor='middle' font-family='Microsoft YaHei, SimHei, Arial'>06</text>
+<text x='1326.4' y='271.2' fill='#172033' font-size='10' font-weight='700' text-anchor='middle' font-family='Microsoft YaHei, SimHei, Arial'>报告与闭环</text>
+<text x='1326.4' y='286.2' fill='#667085' font-size='8' font-weight='400' text-anchor='middle' font-family='Microsoft YaHei, SimHei, Arial'>HTML / CSV / PNG</text>
+<text x='1326.4' y='299.2' fill='#667085' font-size='8' font-weight='400' text-anchor='middle' font-family='Microsoft YaHei, SimHei, Arial'>补扫 SWEEP</text>
+<rect x='101.2' y='544.6' width='290.7' height='82.8' rx='10' fill='#ffffff' stroke='#d8e0ea' filter='url(#shadow)'/>
+<rect x='101.2' y='544.6' width='290.7' height='7.4' rx='10' fill='#2f80ed'/>
+<text x='246.6' y='576.6' fill='#172033' font-size='9' font-weight='700' text-anchor='middle' font-family='Microsoft YaHei, SimHei, Arial'>下位机固件</text>
+<text x='246.6' y='591.6' fill='#667085' font-size='8' font-weight='400' text-anchor='middle' font-family='Microsoft YaHei, SimHei, Arial'>SWEEP 命令解析，定时器/DMA/DAC/ADC 协同</text>
+<rect x='425.0' y='544.6' width='290.7' height='82.8' rx='10' fill='#ffffff' stroke='#d8e0ea' filter='url(#shadow)'/>
+<rect x='425.0' y='544.6' width='290.7' height='7.4' rx='10' fill='#00a884'/>
+<text x='570.4' y='576.6' fill='#172033' font-size='9' font-weight='700' text-anchor='middle' font-family='Microsoft YaHei, SimHei, Arial'>频响分析算法</text>
+<text x='570.4' y='591.6' fill='#667085' font-size='8' font-weight='400' text-anchor='middle' font-family='Microsoft YaHei, SimHei, Arial'>平滑、截止/中心频率、Nyquist 稳定性判断</text>
+<rect x='748.9' y='544.6' width='290.7' height='82.8' rx='10' fill='#ffffff' stroke='#d8e0ea' filter='url(#shadow)'/>
+<rect x='748.9' y='544.6' width='290.7' height='7.4' rx='10' fill='#7a5cff'/>
+<text x='894.2' y='576.6' fill='#172033' font-size='9' font-weight='700' text-anchor='middle' font-family='Microsoft YaHei, SimHei, Arial'>AI 规则库</text>
+<text x='894.2' y='591.6' fill='#667085' font-size='8' font-weight='400' text-anchor='middle' font-family='Microsoft YaHei, SimHei, Arial'>特征提取、模板拟合、故障规则、补扫计划</text>
+<rect x='1072.7' y='544.6' width='290.7' height='82.8' rx='10' fill='#ffffff' stroke='#d8e0ea' filter='url(#shadow)'/>
+<rect x='1072.7' y='544.6' width='290.7' height='7.4' rx='10' fill='#d17b2f'/>
+<text x='1218.1' y='576.6' fill='#172033' font-size='9' font-weight='700' text-anchor='middle' font-family='Microsoft YaHei, SimHei, Arial'>自动控制校正</text>
+<text x='1218.1' y='591.6' fill='#667085' font-size='8' font-weight='400' text-anchor='middle' font-family='Microsoft YaHei, SimHei, Arial'>目标 PM/GM，超前/滞后，输出 Gc(s) 与测试建议</text>
+<rect x='101.2' y='704.7' width='382.7' height='57.0' rx='10' fill='#ffffff' stroke='#d8e0ea' filter='url(#shadow)'/>
+<rect x='101.2' y='704.7' width='382.7' height='7.4' rx='10' fill='#2f9e44'/>
+<text x='292.6' y='736.7' fill='#172033' font-size='9' font-weight='700' text-anchor='middle' font-family='Microsoft YaHei, SimHei, Arial'>智能补扫闭环</text>
+<text x='292.6' y='751.7' fill='#667085' font-size='8' font-weight='400' text-anchor='middle' font-family='Microsoft YaHei, SimHei, Arial'>置信度不足或关键频段缺失时，回写 SWEEP 加密测量</text>
+<rect x='568.6' y='704.7' width='329.4' height='57.0' rx='10' fill='#ffffff' stroke='#d8e0ea' filter='url(#shadow)'/>
+<rect x='568.6' y='704.7' width='329.4' height='7.4' rx='10' fill='#1592a6'/>
+<text x='733.2' y='736.7' fill='#172033' font-size='9' font-weight='700' text-anchor='middle' font-family='Microsoft YaHei, SimHei, Arial'>图表与报告</text>
+<text x='733.2' y='751.7' fill='#667085' font-size='8' font-weight='400' text-anchor='middle' font-family='Microsoft YaHei, SimHei, Arial'>Bode / Nyquist / HTML 报告 / CSV 数据 / PNG 图</text>
+<rect x='982.6' y='704.7' width='382.7' height='57.0' rx='10' fill='#ffffff' stroke='#d8e0ea' filter='url(#shadow)'/>
+<rect x='982.6' y='704.7' width='382.7' height='7.4' rx='10' fill='#d17b2f'/>
+<text x='1173.9' y='736.7' fill='#172033' font-size='9' font-weight='700' text-anchor='middle' font-family='Microsoft YaHei, SimHei, Arial'>诊断结论与调试建议</text>
+<text x='1173.9' y='751.7' fill='#667085' font-size='8' font-weight='400' text-anchor='middle' font-family='Microsoft YaHei, SimHei, Arial'>电路类型、故障候选、校正器参数、下一步测试</text>
+<rect x='82.8' y='787.5' width='311.0' height='29.4' rx='14' fill='#ffffff' stroke='#d8e0ea'/>
+<text x='238.3' y='803.2' fill='#667085' font-size='8' font-weight='400' text-anchor='middle' font-family='Microsoft YaHei, SimHei, Arial'>测量协议稳定：SWEEP -&gt; 三数组输出</text>
+<rect x='421.4' y='787.5' width='439.8' height='29.4' rx='14' fill='#ffffff' stroke='#d8e0ea'/>
+<text x='641.2' y='803.2' fill='#667085' font-size='8' font-weight='400' text-anchor='middle' font-family='Microsoft YaHei, SimHei, Arial'>算法链路完整：频响、稳定性、滤波器类型、故障候选</text>
+<rect x='892.4' y='787.5' width='403.0' height='29.4' rx='14' fill='#ffffff' stroke='#d8e0ea'/>
+<text x='1093.9' y='803.2' fill='#667085' font-size='8' font-weight='400' text-anchor='middle' font-family='Microsoft YaHei, SimHei, Arial'>闭环能力突出：AI补扫 + 控制校正 + 报告导出</text>
+</svg>

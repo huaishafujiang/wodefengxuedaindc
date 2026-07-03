@@ -1,0 +1,20 @@
+<?xml version='1.0' encoding='utf-8'?><VisioDocument xmlns='urn:schemas-microsoft-com:office:visio'><DocumentProperties><Title>STM32G431 智能频响测量与 AI 诊断系统框图</Title></DocumentProperties><Pages><Page ID='0' Name='系统框图'><PageSheet><PageProps><PageWidth>16.54</PageWidth><PageHeight>9.30</PageHeight></PageProps></PageSheet><Shapes><Shape ID='1' Type='Shape'><XForm><PinX>8.27</PinX><PinY>6.13</PinY><Width>14.90</Width><Height>2.36</Height></XForm><Text>主信号链路</Text></Shape><Shape ID='2' Type='Shape'><XForm><PinX>8.27</PinX><PinY>2.95</PinY><Width>14.90</Width><Height>1.86</Height></XForm><Text>关键能力支撑</Text></Shape><Shape ID='3' Type='Shape'><XForm><PinX>2.03</PinX><PinY>6.12</PinY><Width>2.06</Width><Height>1.16</Height></XForm><Text>01  被测电路
+滤波器 / DUT
+输入、输出接入</Text></Shape><Shape ID='4' Type='Shape'><XForm><PinX>4.49</PinX><PinY>6.12</PinY><Width>2.06</Width><Height>1.16</Height></XForm><Text>02  STM32G431 测量
+DAC 激励
+ADC 采样 + FFT</Text></Shape><Shape ID='5' Type='Shape'><XForm><PinX>6.95</PinX><PinY>6.12</PinY><Width>2.06</Width><Height>1.16</Height></XForm><Text>03  三数组串口协议
+omega
+Magnitude_data / Phase_data_rad</Text></Shape><Shape ID='6' Type='Shape'><XForm><PinX>9.41</PinX><PinY>6.12</PinY><Width>2.06</Width><Height>1.16</Height></XForm><Text>04  上位机分析
+Bode / Nyquist
+稳定性与类型识别</Text></Shape><Shape ID='7' Type='Shape'><XForm><PinX>11.87</PinX><PinY>6.12</PinY><Width>2.06</Width><Height>1.16</Height></XForm><Text>05  AI 诊断校正
+故障候选排序
+PM/GM 补偿</Text></Shape><Shape ID='8' Type='Shape'><XForm><PinX>14.33</PinX><PinY>6.12</PinY><Width>2.06</Width><Height>1.16</Height></XForm><Text>06  报告与闭环
+HTML / CSV / PNG
+补扫 SWEEP</Text></Shape><Shape ID='9' Type='Shape'><XForm><PinX>2.68</PinX><PinY>2.93</PinY><Width>3.16</Width><Height>0.90</Height></XForm><Text>下位机固件
+SWEEP 命令解析，定时器/DMA/DAC/ADC 协同</Text></Shape><Shape ID='10' Type='Shape'><XForm><PinX>6.20</PinX><PinY>2.93</PinY><Width>3.16</Width><Height>0.90</Height></XForm><Text>频响分析算法
+平滑、截止/中心频率、Nyquist 稳定性判断</Text></Shape><Shape ID='11' Type='Shape'><XForm><PinX>9.72</PinX><PinY>2.93</PinY><Width>3.16</Width><Height>0.90</Height></XForm><Text>AI 规则库
+特征提取、模板拟合、故障规则、补扫计划</Text></Shape><Shape ID='12' Type='Shape'><XForm><PinX>13.24</PinX><PinY>2.93</PinY><Width>3.16</Width><Height>0.90</Height></XForm><Text>自动控制校正
+目标 PM/GM，超前/滞后，输出 Gc(s) 与测试建议</Text></Shape><Shape ID='13' Type='Shape'><XForm><PinX>3.18</PinX><PinY>1.33</PinY><Width>4.16</Width><Height>0.62</Height></XForm><Text>智能补扫闭环
+置信度不足或关键频段缺失时，回写 SWEEP 加密测量</Text></Shape><Shape ID='14' Type='Shape'><XForm><PinX>7.97</PinX><PinY>1.33</PinY><Width>3.58</Width><Height>0.62</Height></XForm><Text>图表与报告
+Bode / Nyquist / HTML 报告 / CSV 数据 / PNG 图</Text></Shape><Shape ID='15' Type='Shape'><XForm><PinX>12.76</PinX><PinY>1.33</PinY><Width>4.16</Width><Height>0.62</Height></XForm><Text>诊断结论与调试建议
+电路类型、故障候选、校正器参数、下一步测试</Text></Shape></Shapes></Page></Pages></VisioDocument>

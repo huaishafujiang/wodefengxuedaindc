@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>测量报告 - 2026-06-20 23:19:21</title>
+  <style>
+    body { font-family: "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif; margin: 28px; color: #111827; }
+    h1 { font-size: 24px; margin: 0 0 8px; }
+    h2 { font-size: 17px; margin: 26px 0 10px; border-bottom: 1px solid #e5e7eb; padding-bottom: 6px; }
+    table { border-collapse: collapse; width: 100%; margin: 8px 0 12px; }
+    th, td { border: 1px solid #e5e7eb; padding: 7px 9px; text-align: left; vertical-align: top; }
+    th { width: 180px; background: #f8fafc; }
+    img { max-width: 100%; border: 1px solid #e5e7eb; }
+    pre { white-space: pre-wrap; background: #f8fafc; border: 1px solid #e5e7eb; padding: 12px; }
+    .muted { color: #64748b; }
+    .module-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin: 16px 0 20px; }
+    .module-card { border: 1px solid #d7dee8; border-radius: 10px; padding: 14px; background: #ffffff; }
+    .module-card h3 { font-size: 14px; margin: 0 0 8px; }
+    .module-card p { margin: 0; color: #334155; line-height: 1.58; }
+    @media (max-width: 900px) { .module-grid { grid-template-columns: 1fr; } }
+    
+    .formula-card { border: 1px solid #d7dee8; border-radius: 12px; padding: 18px; background: #ffffff; }
+    .formula-title { font-size: 15px; font-weight: 700; color: #172033; margin-bottom: 10px; }
+    .formula-display { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; font-size: 26px; font-weight: 700; color: #111827; margin: 12px 0; }
+    .formula-frac { display: inline-flex; flex-direction: column; align-items: stretch; min-width: 280px; text-align: center; line-height: 1.22; }
+    .formula-num { border-bottom: 2px solid #172033; padding: 0 10px 5px; }
+    .formula-den { padding: 5px 10px 0; }
+    .formula-details { margin: 10px 0 0; color: #334155; line-height: 1.65; }
+    .formula-details li { margin: 2px 0; }
+    .formula-image { max-width: 100%; border: 0; background: #ffffff; }
+    
+  </style>
+</head>
+<body>
+  <h1>频响测量报告</h1>
+  <div class="muted">导出时间：2026-06-20 23:19:21</div>
+
+  <div class="module-grid">
+    <section class="module-card">
+      <h3>模块 1：扫频参数</h3>
+      <p>记录本次串口、命令、频率范围和点数，方便复现实测条件。</p>
+    </section>
+    <section class="module-card">
+      <h3>模块 2：识别结论</h3>
+      <p>汇总滤波器族、阶次、关键频率、置信度和期望电路匹配状态。</p>
+    </section>
+    <section class="module-card">
+      <h3>模块 3：等效传函</h3>
+      <p>把 AI 拟合模型拆成可阅读公式、参数和可信度说明，不再只给文本串。</p>
+    </section>
+  </div>
+
+  <h2>模块 1：扫频参数</h2>
+  <table><tr><th>时间</th><td>2026-06-20 23:19:21</td></tr>
+<tr><th>来源</th><td>文件导入: 07_二阶带阻系统_实测原始.txt</td></tr>
+<tr><th>波特率</th><td>115200</td></tr>
+<tr><th>扫频命令</th><td>SWEEP 100 20000 100 1.2
+</td></tr>
+<tr><th>期望电路</th><td>Auto</td></tr>
+<tr><th>点数</th><td>200</td></tr>
+<tr><th>起始频率 Hz</th><td>100.009</td></tr>
+<tr><th>终止频率 Hz</th><td>20000</td></tr></table>
+
+  <h2>模块 2：识别结果与结构化诊断</h2>
+  <table><tr><th>识别结果</th><td>二阶带阻滤波器</td></tr>
+<tr><th>滤波类型</th><td>bandstop</td></tr>
+<tr><th>阶次</th><td>2</td></tr>
+<tr><th>特征角频率 rad/s</th><td>12566.4</td></tr>
+<tr><th>特征频率 Hz</th><td>2000</td></tr>
+<tr><th>左截止 Hz</th><td>558.589</td></tr>
+<tr><th>右截止 Hz</th><td>7267.67</td></tr>
+<tr><th>带宽 Hz</th><td>6709.08</td></tr>
+<tr><th>稳定性</th><td>奈奎斯特判据显示闭环稳定，且稳定裕度较好。</td></tr></table>
+  <table><tr><th>判定</th><td>二阶带阻系统</td></tr>
+<tr><th>置信度</th><td>0.99</td></tr>
+<tr><th>Top3</th><td>带阻/2阶 0.99 / 未知/1阶 0.07 / 高通/1阶 0.03</td></tr>
+<tr><th>关键频率</th><td>陷波中心 1965 Hz, 阻带宽度 7603 Hz</td></tr>
+<tr><th>测量健康</th><td>A 可直接验收（90/100）</td></tr>
+<tr><th>测量质量</th><td>无削顶；输入RMS中位数 0.4240 V；输出RMS中位数 0.3305 V；PA1 DC约 1.641 V</td></tr>
+<tr><th>AI结论</th><td>当前数据只能证明被测对象在 100-20000 Hz 范围内呈现带阻趋势；估计关键频率约 1965 Hz，已经超出本次扫频范围，不能把等效传函当最终模型。</td></tr>
+<tr><th>控制校正</th><td>自动: 暂未生成校正器。</td></tr>
+<tr><th>测量补扫</th><td>估计关键边界超出当前扫频范围，不能继续按外推频点加密补扫；请先扩大总扫频范围覆盖真实截止点，或把当前频段作为局部已补扫结果验收。</td></tr>
+<tr><th>故障证据</th><td>暂未触发故障知识库规则</td></tr>
+<tr><th>下一步建议</th><td>自动: 暂未生成校正器。；请确认测量的是开环频响；如果扫频全程低于 0 dB，请填写目标穿越 Hz，软件会按该频点计算比例增益或超前校正器。；估计关键边界超出当前扫频范围，不能继续按外推频点加密补扫；请先扩大总扫频范围覆盖真实截止点，或把当前频段作为局部已补扫结果验收。</td></tr></table>
+
+  <h2>模块 3：等效传递函数公式</h2>
+  <div class="formula-card"><div class="formula-title">等效传递函数 · 带阻</div><div><img class="formula-image" src="transfer_formula.png" alt="Equivalent transfer function formula"></div><div class="formula-display"><span>H(s)=</span><span class="formula-frac"><span class="formula-num">0.9843s^2 + 4033s + 1.5003e+08</span><span class="formula-den">s^2 + 4.7773e+04s + 1.5242e+08</span></span></div><ul class="formula-details"><li>K=0.9843, f0=1.96e+03 Hz, w0=1.235e+04 rad/s, Q=0.258, notch_floor=-21.3 dB</li><li>拟合质量: R2=0.999, RMSE=0.16 dB</li></ul></div>
+  <table><tr><th>表达式</th><td>H(s) = (0.9843s^2 + 4033s + 1.500e+08) / (s^2 + 4.777e+04s + 1.524e+08)</td></tr>
+<tr><th>参数</th><td>K=0.9843, f0=1.96e+03 Hz, w0=1.235e+04 rad/s, Q=0.258, notch_floor=-21.3 dB</td></tr>
+<tr><th>拟合可信度</th><td>高：模板与扫频数据吻合较好，可作为等效传函参考。</td></tr>
+<tr><th>分子系数</th><td>0.984275, 4033.03, 1.50027e+08</td></tr>
+<tr><th>分母系数</th><td>1, 47772.8, 1.52423e+08</td></tr></table>
+
+  <h2>测量质量、故障建议与原始报告行</h2>
+  <pre>=== 稳频仪：滤波器频响识别分析报告 ===<br>系统类型: 二阶带阻滤波器<br>滤波器族: 带阻滤波器<br>估计阶次: 2<br>判阶可靠性: 可靠（置信度 0.95）<br>期望电路: Auto<br>期望匹配: 未指定期望电路，按自动识别结果验收。<br>数据点数: 200<br>截止/特征判据: band-stop -3 dB edges<br>--- 识别证据 ---<br>幅频斜率证据: 低频端 -15.7 dB/dec，高频端 3.9 dB/dec。<br>幅值跨度: 19.8 dB。<br>相位跨度: 34.2°。<br>相位延迟补偿: 未触发。<br>--- 测量质量诊断 ---<br>测量质量: 输入RMS中位数 0.4240 V，输出RMS中位数 0.3305 V。<br>峰峰值: 输入P-P中位数 1.2050 V，输出P-P中位数 0.9485 V。<br>削顶频点统计: PA0 0 个，PA1 0 个。<br>测量偏置: PA0 DC≈1.647 V，PA1 DC≈1.641 V。<br>左侧 -3 dB 角频率 = 3509.72 rad/s<br>右侧 -3 dB 角频率 = 45664.14 rad/s<br>陷波角频率 ω0 = 12566.37 rad/s<br>阻带宽度 = 42154.42 rad/s<br>陷波深度 = 19.8 dB<br>特征频点相位 = -3.84 °<br><br><br>=== AI辅助电路识别与智能诊断报告 v2 ===<br>智能识别: 二阶带阻系统<br>判定策略: 传统频响分析为主判据：filter_analysis 已可靠判定为二阶带阻系统（置信度 0.95），AI用于传递函数拟合、故障证据链和主动补扫建议。<br>置信度: 0.99（需补扫确认）<br>关键频率: 陷波中心 1965 Hz，阻带宽度 7603 Hz<br>候选排名: 二阶带阻系统 0.99 / 未知系统 0.07 / 一阶高通系统 0.03<br>模型拟合: 带阻二阶模板: f0=1964.9 Hz, Q=0.26, R2=0.999；RMSE=0.16 dB, 最大残差=0.86 dB；参数={gain_db=-0.138, f0_hz=1.96e+03, q=0.258, bandwidth_hz=7.6e+03, notch_floor_db=-21.3}<br>传函可信度: 高：模板与扫频数据吻合较好，可作为等效传函参考。<br>等效传递函数: H(s) = (0.9843s^2 + 4033s + 1.500e+08) / (s^2 + 4.777e+04s + 1.524e+08)；K=0.9843, f0=1.96e+03 Hz, w0=1.235e+04 rad/s, Q=0.258, notch_floor=-21.3 dB；num=[0.9843, 4033, 1.500e+08]；den=[1, 4.777e+04, 1.524e+08]<br><br>--- 自动控制校正 ---<br>自动: 暂未生成校正器。<br>自然增益穿越: ωgc=无法计算, PM=无法计算, GM=无法计算<br>推荐校正器: 暂不校正<br>依据: 暂未生成校正器<br>使用建议: 请确认测量的是开环频响；如果扫频全程低于 0 dB，请填写目标穿越 Hz，软件会按该频点计算比例增益或超前校正器。<br>提示: 全扫频范围内开环幅值低于 0 dB，未形成增益穿越。<br>测量健康: A 可直接验收（90/100）<br>测量质量: 无削顶；输入RMS中位数 0.4240 V；输出RMS中位数 0.3305 V；PA1 DC约 1.641 V<br>故障证据链: 暂未触发故障知识库规则<br>可能故障原因: 暂未发现明显硬件故障；本次补扫建议主要用于提高识别/拟合可信度。<br>AI实用结论: 当前数据只能证明被测对象在 100-20000 Hz 范围内呈现带阻趋势；估计关键频率约 1965 Hz，已经超出本次扫频范围，不能把等效传函当最终模型。<br>建议实验动作: 若要确认真实截止点，把总扫频扩到 200-200000 Hz，步进约 2000 Hz。；若要演示中心频率移动，同时改变等效 R 或 C：RC 乘积增大时中心频率降低，RC 乘积减小时中心频率升高。；若演示自动控制校正，先按“控制校正建议”填写目标穿越 Hz，再重新导入同一组数据生成 K 或 Gc(s)。<br>测量补扫建议: 估计关键边界超出当前扫频范围，不能继续按外推频点加密补扫；请先扩大总扫频范围覆盖真实截止点，或把当前频段作为局部已补扫结果验收。<br>控制校正建议: 自动: 暂未生成校正器。；请确认测量的是开环频响；如果扫频全程低于 0 dB，请填写目标穿越 Hz，软件会按该频点计算比例增益或超前校正器。<br>下一步测试建议: 自动: 暂未生成校正器。；请确认测量的是开环频响；如果扫频全程低于 0 dB，请填写目标穿越 Hz，软件会按该频点计算比例增益或超前校正器。；估计关键边界超出当前扫频范围，不能继续按外推频点加密补扫；请先扩大总扫频范围覆盖真实截止点，或把当前频段作为局部已补扫结果验收。<br>关键特征: 低频-4.8 dB，高频-0.7 dB，低频斜率-17.2 dB/dec，高频斜率5.2 dB/dec，相位跨度28.3 deg，Nyquist到(-1,0)最小距离1.088<br></pre>
+
+  <h2>备注</h2>
+  <p>无</p>
+
+  <h2>Bode / Nyquist 图</h2>
+  <img src="bode_nyquist.png" alt="Bode and Nyquist plot">
+
+  <h2>附件</h2>
+  <ul>
+    <li><a href="raw_data.csv">raw_data.csv</a></li>
+    <li><a href="diagnostics.csv">diagnostics.csv</a></li>
+    <li><a href="bode_nyquist.png">bode_nyquist.png</a></li>
+    <li><a href="transfer_formula.png">transfer_formula.png</a></li>
+  </ul>
+</body>
+</html>
