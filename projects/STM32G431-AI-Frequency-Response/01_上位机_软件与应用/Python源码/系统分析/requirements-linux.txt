@@ -1,4 +1,0 @@
-pyserial
-numpy
-matplotlib
-scipy
