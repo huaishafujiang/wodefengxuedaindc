@@ -1,0 +1,91 @@
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.spec.bak
+
+# IDE and OS metadata
+.idea/
+.vscode/
+.agents/
+.codex/
+.DS_Store
+Thumbs.db
+
+# Keil transient build products (committed source and delivered binaries stay visible)
+**/MDK-ARM/*.dep
+**/MDK-ARM/*.lnp
+**/MDK-ARM/*.htm
+**/MDK-ARM/*.crf
+**/MDK-ARM/*.d
+**/MDK-ARM/*.o
+**/MDK-ARM/*.lst
+**/MDK-ARM/*.map
+**/MDK-ARM/G431CBTx_sweep/
+**/MDK-ARM/*.uvguix.*
+
+# Generated reports and local logs
+report_session_*/
+*.log
+
+# Private, locally generated course indexes are not source-release artifacts
+**/.assistant_index/
+
+# Regenerable offline speech models distributed beside the Windows executable
+**/voice_models/
+
+# Local acceptance and scratch output (never part of the formal delivery)
+/tmp/
+**/tmp/
+**/.codex-temp/
+**/.test-runtime/
+**/.codex-pycache/
+/N
+# Large packaged delivery archives (keep source tree in Git; publish archives via Releases/网盘)
+*.zip
+*.7z
+*.rar
+
+# Python and application build outputs
+**/dist/
+**/build/
+**/__pycache__/
+**/.pytest_cache/
+**/.codex-temp/
+**/.test-runtime/
+
+# Local scratch and exported media
+视频素材/
+新建文件夹/
+# GitHub repository hygiene
+*.exe
+*.pkg
+*.zip
+*.7z
+*.rar
+**/dist/
+**/build/
+**/__pycache__/
+**/.pytest_cache/
+**/.codex-temp/
+**/.test-runtime/
+视频素材/
+新建文件夹/
+
+*.exe
+*.pkg
+*.zip
+*.7z
+*.rar
+**/dist/
+**/build/
+**/__pycache__/
+**/.pytest_cache/
+**/.codex-temp/
+**/.test-runtime/
+视频素材/
+新建文件夹/
