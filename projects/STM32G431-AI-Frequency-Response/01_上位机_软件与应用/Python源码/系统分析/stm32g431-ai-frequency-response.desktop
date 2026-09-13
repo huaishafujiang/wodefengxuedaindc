@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=STM32G431 AI Frequency Response
+Name[zh_CN]=STM32G431 智能频响分析
+Comment=Frequency response measurement, AI diagnosis, and control compensation
+Comment[zh_CN]=频响测量、AI 诊断与自动控制校正
+Exec=sh -c 'cd "$(dirname "%k")" && ./run_ubuntu.sh'
+Icon=frequency_response_icon
+Terminal=false
+Categories=Education;Science;Engineering;
